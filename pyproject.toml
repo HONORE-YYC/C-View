@@ -9,7 +9,12 @@ description = "A Python desktop visualizer for a teaching subset of C and linear
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
-dependencies = ["PySide6-Essentials>=6.8,<7", "pycparser>=2.21,<3"]
+dependencies = [
+    # Avoid the Qt 6.12 shutdown abort observed on Linux with Python 3.11.
+    "PySide6-Essentials>=6.8,<6.12; sys_platform == 'linux' and python_version < '3.12'",
+    "PySide6-Essentials>=6.8,<7; sys_platform != 'linux' or python_version >= '3.12'",
+    "pycparser>=2.21,<3",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "build>=1,<2"]

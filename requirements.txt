@@ -1,2 +1,4 @@
-PySide6-Essentials>=6.8,<7
+# Qt 6.12 aborts on interpreter shutdown in Linux/Python 3.11 CI.
+PySide6-Essentials>=6.8,<6.12; sys_platform == 'linux' and python_version < '3.12'
+PySide6-Essentials>=6.8,<7; sys_platform != 'linux' or python_version >= '3.12'
 pycparser>=2.21,<3
