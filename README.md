@@ -2,8 +2,6 @@
 
 用 Python 编写的中文桌面教学程序。自由输入 C 代码，在同一条执行流程中观察变量、运算、条件、循环、一维数组、顺序表、栈和循环队列。
 
-当前版本 **0.3.0**：增加绿色赋值传递动画和随下标变量平滑移动的小箭头。右上角“07 赋值与下标动画”示例可以直接演示本次更新；保留宏、`cstdlib` 常用函数和灰/绿变量方框。
-
 ![桌面界面](docs/preview.png)
 
 [查看动画演示](docs/animation.gif)
@@ -113,59 +111,6 @@ python3 -m venv .venv
 **资源限制：** 每次最多 100000 步；代码最多 64000 字符；数组容量 1–4096，存活数组总元素不超过 16384；同时存活变量不超过 512；输出最多 100000 字符。每个数组最多绘制前 64 个单元，执行器仍处理完整数组，界面提示截断。执行日志保留最近 300 行。
 
 宏限制为 256 个定义、32 层嵌套和 10000 次展开；展开后的文本最多 256000 字符。
-
-## 5. 具体实现步骤与代码入口
-
-完整教程见 [docs/tutorial.md](docs/tutorial.md)，实施清单见 [docs/implementation.md](docs/implementation.md)。按下面顺序阅读代码最容易理解：
-
-```text
-c-visualizer/
-├── main.py                    # 启动入口
-├── cvisualizer/
-│   ├── language.py            # 解析、语法白名单、源代码位置
-│   ├── preprocessor.py        # 宏展开、头文件兼容与原始位置映射
-│   ├── runtime.py             # 变量作用域、数值、数组、表达式
-│   ├── engine.py              # 可暂停执行器和每步快照
-│   ├── motion.py              # 按词法作用域识别数组下标变量
-│   ├── animations.py          # 赋值箭头、下标指针与时间插值
-│   ├── controller.py          # 播放/暂停/停止/指定语句状态机
-│   ├── structures.py          # 数据结构绑定与视图模型
-│   ├── editor.py              # C 编辑器、行号、语法颜色
-│   ├── views.py               # 变量/数组/顺序表/栈/队列绘制
-│   ├── bindings.py            # 绑定编辑与配置保存
-│   ├── window.py              # 桌面界面与 Qt 定时器
-│   └── examples/              # 可编辑 C 示例和 JSON 绑定
-├── tests/                     # 执行器、控制器、结构与界面测试
-├── docs/                      # 教程、实现步骤、验证记录
-└── .github/workflows/tests.yml
-```
-
-## 6. 测试与构建
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install ".[dev]"
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m build
-```
-
-GUI 测试使用 Qt offscreen 模式，不弹出窗口。发布包的示例包含在 wheel 中。GitHub Actions 已配置 Windows/Linux 与 Python 3.11/3.13 的测试和构建；尚未在远程 GitHub 仓库执行，实际本地验证见 [docs/validation.md](docs/validation.md)。
-
-## 7. 上传 GitHub
-
-先在 GitHub 创建一个空仓库，例如 `c-visualizer`，不要预先添加 README、许可证或 .gitignore。然后在本项目目录执行：
-
-```powershell
-git init
-git add .
-git commit -m "Initial C View desktop visualizer"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/c-visualizer.git
-git push -u origin main
-```
-
-把 `YOUR_USERNAME` 换成自己的 GitHub 用户名。登录 GitHub/Git 时按 Git 的提示完成授权。如果 Git 尚未设置提交者身份，按其提示设置自己的用户名与邮箱。`.gitignore` 已排除虚拟环境、缓存和构建产物。
-
-当前交付为源码，不是已上传的远程仓库，也不是独立 `.exe`。后续可以增加函数调用、结构体、指针内存图、链表、执行回退和平滑动画。
 
 ## 许可与技术来源
 
