@@ -1,7 +1,7 @@
 """C editor with a line-number gutter and execution highlighting."""
 import re
 
-from PySide6.QtCore import Qt, QRect, QSize
+from PySide6.QtCore import Qt, QRect, QSize, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QWidget, QTextEdit
 from .editing import context, escaped
@@ -45,8 +45,11 @@ class Gutter(QWidget):
 
 
 class CodeEditor(QPlainTextEdit):
+    markChanged = Signal(bool)
+
     def __init__(self):
         super().__init__()
+        self._execution_cursor = None
         self.setFont(QFont('Consolas', 11))
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance(' ') * 4)
@@ -226,11 +229,11 @@ class CodeEditor(QPlainTextEdit):
             number += 1
 
     def mark(self, line=0, column=1, color='#fef3c7'):
-        if line <= 0:
-            self.setExtraSelections([])
-            return
         block = self.document().findBlockByNumber(line-1)
-        if not block.isValid():
+        if line <= 0 or not block.isValid():
+            self._execution_cursor = None
+            self.setExtraSelections([])
+            self.markChanged.emit(False)
             return
         selection = QTextEdit.ExtraSelection()
         selection.format.setBackground(QColor(color))
@@ -240,6 +243,13 @@ class CodeEditor(QPlainTextEdit):
         cursor = QTextCursor(block)
         cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.MoveAnchor,
                             min(column-1, max(0, block.length()-1)))
-        self.setTextCursor(cursor)
+        self._execution_cursor = cursor
         self.setExtraSelections([selection])
+        self.markChanged.emit(True)
+
+    def jump_to_execution(self):
+        if self._execution_cursor is None:
+            return
+        self.setTextCursor(self._execution_cursor)
         self.ensureCursorVisible()
+        self.setFocus()

@@ -4,7 +4,7 @@ Read/write borders are independent of initialization and structure membership.
 """
 from PySide6.QtCore import Qt, QPointF
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPen, QBrush, QPainter
-from PySide6.QtWidgets import QGraphicsView, QGraphicsScene
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsItem, QScrollBar
 
 from .structures import Binding, describe, KINDS
 from .animations import MotionLayer
@@ -26,17 +26,86 @@ class MemoryView(QGraphicsView):
         self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.setBackgroundBrush(QColor('#ffffff'))
         self.setMinimumWidth(340)
-        self._data = ({}, [], None, {})
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        self._data = ({}, [], None, {}, {})
         self._rendering = False
         self._has_render = False
         self.boxes = {}
         self.array_anchors = {}
         self.motion = MotionLayer(self.scene(), self)
+        self._content_parent = None
+        self._sections = {}
+        self.scalar_scroll = QScrollBar(Qt.Orientation.Vertical, self.viewport())
+        self.array_scroll = QScrollBar(Qt.Orientation.Vertical, self.viewport())
+        for name, bar in [('scalar', self.scalar_scroll), ('array', self.array_scroll)]:
+            bar.setSingleStep(24)
+            bar.valueChanged.connect(lambda _, section=name: self._scroll_section(section))
+
+    def _scroll_section(self, name):
+        if self._rendering or name not in self._sections:
+            return
+        clip, content = self._sections[name]
+        bar = self.scalar_scroll if name == 'scalar' else self.array_scroll
+        delta = -bar.value() - content.y()
+        content.setY(-bar.value())
+        if name == 'array':
+            for key, item in self.motion.pointers.items():
+                shift = QPointF(0, delta)
+                item.moveBy(0, delta)
+                self.motion.destinations[key] += shift
+                self.motion.origins[key] += shift
+        self.motion.finish()
+
+    def _begin_section(self, name, top, bottom, width):
+        clip = QGraphicsRectItem(0, top, width, max(1, bottom-top))
+        clip.setPen(QPen(Qt.PenStyle.NoPen))
+        clip.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape)
+        self.scene().addItem(clip)
+        content = QGraphicsRectItem(clip)
+        content.setPen(QPen(Qt.PenStyle.NoPen))
+        self._sections[name] = clip, content
+        self._content_parent = content
+
+    def _end_section(self, name, bottom):
+        clip, content = self._sections[name]
+        bar = self.scalar_scroll if name == 'scalar' else self.array_scroll
+        rect = clip.rect()
+        bar.blockSignals(True)
+        bar.setPageStep(int(rect.height()))
+        bar.setRange(0, max(0, int(bottom-rect.bottom())))
+        bar.blockSignals(False)
+        bar.setGeometry(int(rect.right()), int(rect.top()), 16, int(rect.height()))
+        bar.setVisible(bar.maximum() > 0)
+        content.setY(-bar.value())
+        self._content_parent = None
+
+    def _visible_box(self, key):
+        item = self.boxes[key]
+        name = 'scalar' if key[1] is None else 'array'
+        clip, _ = self._sections[name]
+        return clip.rect().contains(item.mapRectToScene(item.rect()))
+
+    def wheelEvent(self, event):
+        position = self.mapToScene(event.position().toPoint())
+        for name, (clip, _) in self._sections.items():
+            if clip.rect().contains(position):
+                bar = self.scalar_scroll if name == 'scalar' else self.array_scroll
+                pixels = event.pixelDelta().y()
+                delta = pixels if pixels else event.angleDelta().y() / 120 * bar.singleStep() * 3
+                bar.setValue(bar.value()-int(delta))
+                event.accept()
+                return
+        event.ignore()
 
     def label(self, text, x, y, size=10, color='#334155', bold=False):
         font = QFont('Microsoft YaHei UI', size)
         font.setBold(bold)
         item = self.scene().addText(str(text), font)
+        if self._content_parent is not None:
+            item.setParentItem(self._content_parent)
         item.setDefaultTextColor(QColor(color))
         item.setPos(x, y)
         return item
@@ -49,6 +118,7 @@ class MemoryView(QGraphicsView):
         if written:
             border = '#f59e0b'
         rect = self.scene().addRect(x, y, width, 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(QColor(fill)))
+        rect.setParentItem(self._content_parent)
         rect.setData(0, name)
         text = name if value is None else f'{name} = {display(value)}'
         rect.setToolTip(text + ('（未初始化）' if value is None else ''))
@@ -64,9 +134,9 @@ class MemoryView(QGraphicsView):
         return ((name, index) in event.reads,
                 (name, index) in event.writes or (name, None) in event.writes)
 
-    def render(self, variables, bindings, event=None, pointers=None, duration=600, animate=True, force=False):
+    def render(self, variables, bindings, event=None, pointers=None, index_lanes=None, duration=600, animate=True, force=False):
         pointers = pointers or {}
-        data = (variables, list(bindings), event, pointers)
+        data = (variables, list(bindings), event, pointers, index_lanes or {})
         if self._rendering:
             return
         if self._has_render and not force and data == self._data:
@@ -74,7 +144,7 @@ class MemoryView(QGraphicsView):
         self._has_render = True
         previous = {key: QPointF(item.pos()) for key, item in self.motion.pointers.items()}
         was_busy = self.motion.busy
-        visible_before = set(self.boxes)
+        visible_before = {key for key in self.boxes if self._visible_box(key)}
         same_event = event is self._data[2]
         self._data = data
         self._rendering = True
@@ -85,8 +155,10 @@ class MemoryView(QGraphicsView):
             transfers = []
             if event and animate and not same_event:
                 for source, target in dict.fromkeys(event.transfers):
-                    if source in visible_before and source in self.boxes and target in self.boxes:
-                        transfers.append((self.boxes[source].rect(), self.boxes[target].rect()))
+                    if (source in visible_before and source in self.boxes and target in self.boxes
+                            and self._visible_box(source) and self._visible_box(target)):
+                        transfers.append((self.boxes[source].mapRectToScene(self.boxes[source].rect()),
+                                          self.boxes[target].mapRectToScene(self.boxes[target].rect())))
             destinations = {}
             lanes = {}
             for key, index in pointers.items():
@@ -97,15 +169,17 @@ class MemoryView(QGraphicsView):
                 valid = box is not None
                 label = f'{counter} = {index}'
                 if valid:
-                    rect = box.rect()
+                    rect = box.mapRectToScene(box.rect())
                     point = QPointF(rect.left()+18+min(lane*28, rect.width()-40), rect.top()-4)
                 elif (array, identity) in self.array_anchors:
-                    point = self.array_anchors[array, identity] + QPointF(0, lane*22)
+                    point = self.array_anchors[array, identity] + QPointF(0, lane*22-self.array_scroll.value())
                     label += '（越界）' if not 0 <= index < len(variables[array]['value']) else '（未绘制）'
                 else:
                     continue
                 destinations[key] = (point, label, lane if valid else 0, valid)
             self.motion.start(transfers, destinations, previous, duration, animate and not same_event)
+            for item in self.motion.pointers.values():
+                item.setParentItem(self._sections['array'][0])
         finally:
             self._rendering = False
         if was_busy and not self.motion.busy:
@@ -113,20 +187,27 @@ class MemoryView(QGraphicsView):
 
     def _draw(self, variables, bindings, event):
         self.scene().clear()
+        self._sections = {}
+        self._content_parent = None
         width = max(300, self.viewport().width()-28)
+        height = max(1, self.viewport().height())
+        self.scene().setSceneRect(0, 0, self.viewport().width(), self.viewport().height())
         columns = max(2, int((width-24)//150))
         box_width = (width-28)/columns-12
         y = 12
         if not variables:
+            for bar in (self.scalar_scroll, self.array_scroll):
+                bar.setValue(0)
+                bar.hide()
             self.label('每一步，都看得见', 18, y+12, 18, '#0f766e', True)
             item = self.label('定义变量或数组后，这里会生成方框。\n灰色：未赋值，仅显示名字\n绿色：已有值，显示「名字 = 值」\n蓝色边框：读取  ·  橙色边框：写入', 18, y+58, 10)
             item.setTextWidth(width-36)
-            self.scene().setSceneRect(0, 0, width, 250)
             return
         if event:
             title = self.label(f'本步：{event.text}', 16, y, 10, '#0f766e', True)
-            title.setTextWidth(width-32)
-            y += title.boundingRect().height()+4
+            title.setToolTip(title.toPlainText())
+            title.setPlainText(QFontMetricsF(title.font()).elidedText(title.toPlainText().replace('\n', ' '), Qt.TextElideMode.ElideRight, width-32))
+            y = 32
             changes = []
             for name, index in dict.fromkeys(event.writes):
                 after_cell = event.variables.get(name, {})
@@ -143,20 +224,29 @@ class MemoryView(QGraphicsView):
                 changes.append(f'{target}: {display(old) if old is not None else "未赋值"} → {display(new) if new is not None else "未赋值"}')
             if changes:
                 info = self.label('  ·  '.join(changes[:8]), 16, y, 9, '#64748b')
-                info.setTextWidth(width-32)
-                y += info.boundingRect().height()+6
-            y += 12
+                info.setToolTip(info.toPlainText())
+                info.setPlainText(QFontMetricsF(info.font()).elidedText(info.toPlainText(), Qt.TextElideMode.ElideRight, width-32))
+        scalar_bottom = min(220, max(144, int(height*.33)))
+        self.label('变量', 16, 58, 12, '#0f172a', True)
+        self._begin_section('scalar', 88, scalar_bottom, width)
+        y = 100
         scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list)]
         if scalars:
-            self.label('变量', 16, y, 12, '#0f172a', True)
-            y += 38
             for pos, (name, cell) in enumerate(scalars):
                 x = 18+(pos % columns)*(box_width+12)
                 row_y = y+(pos//columns)*63
                 read, written = self.activity(name, None, cell, event)
                 self.boxes[name, None, cell['identity']] = self.box(name, cell['value'], x, row_y, box_width, read, written)
             y += ((len(scalars)+columns-1)//columns)*63+16
+        else:
+            self.label('尚无标量变量', 18, y, 10, '#64748b')
+        self._end_section('scalar', y)
+        self.scene().addLine(16, scalar_bottom+6, width-4, scalar_bottom+6, QPen(QColor('#e2e8f0')))
+        self._begin_section('array', scalar_bottom+12, height, width)
+        y = scalar_bottom+20
         bound = {b.array: b for b in bindings}
+        if not any(isinstance(cell['value'], list) for cell in variables.values()):
+            self.label('声明数组后，在这里观察数组与数据结构。', 18, y, 10, '#64748b')
         for name, cell in variables.items():
             if not isinstance(cell['value'], list):
                 continue
@@ -166,10 +256,13 @@ class MemoryView(QGraphicsView):
             y += 34
             note = self.label(model.error or model.note or f'capacity = {len(model.values)}', 16, y, 9,
                               '#b45309' if model.error else '#64748b')
-            note.setTextWidth(width-30)
-            pointer_count = sum(key[0] == name and key[1] == cell['identity'] for key in self._data[3])
+            note.setToolTip(note.toPlainText())
+            note.setPlainText(QFontMetricsF(note.font()).elidedText(note.toPlainText().replace('\n', ' '), Qt.TextElideMode.ElideRight, width-30))
+            # Reserve lanes from the program before counters enter/leave scope.
+            pointer_count = self._data[4].get(cell.get('declaration'),
+                sum(key[0] == name and key[1] == cell['identity'] for key in self._data[3]))
             marker_space = 20*max(0, pointer_count-1)
-            y += note.boundingRect().height()+42+marker_space
+            y += note.boundingRect().height()+(42 if pointer_count else 12)+marker_space
             active = set(model.active)
             visible = list(range(min(64, len(model.values))))
             vertical = model.kind == 'stack'
@@ -200,9 +293,10 @@ class MemoryView(QGraphicsView):
                 text = self.label('逻辑顺序：'+order, 18, y, 9, '#0f766e')
                 text.setTextWidth(width-36)
                 y += text.boundingRect().height()+12
-            self.scene().addLine(16, y+4, width-4, y+4, QPen(QColor('#e2e8f0')))
+            line = self.scene().addLine(16, y+4, width-4, y+4, QPen(QColor('#e2e8f0')))
+            line.setParentItem(self._content_parent)
             y += 30
-        self.scene().setSceneRect(0, 0, width, y)
+        self._end_section('array', y)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

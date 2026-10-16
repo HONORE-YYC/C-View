@@ -48,7 +48,10 @@ def test_editor_line_numbers_target_selection_and_snapshot(app, tmp_path):
     i = next(i for i in range(w.targets.count()) if w.targets.itemData(i).line == 3)
     w.targets.setCurrentIndex(i)
     w.seek()
-    w.on_tick()
+    for _ in range(100):
+        w.on_tick()
+        if w.controller.state != 'seeking':
+            break
     assert w.controller.state == 'paused'
     assert w.controller.engine.runtime.snapshot()['x']['value'] == 0
     app.processEvents()

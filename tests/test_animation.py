@@ -114,7 +114,10 @@ def test_seek_skips_intermediate_animations(app):
     index = next(i for i in range(w.targets.count()) if w.targets.itemData(i).line == 3)
     w.targets.setCurrentIndex(index)
     w.seek()
-    w.on_tick()
+    for _ in range(100):
+        w.on_tick()
+        if w.controller.state != 'seeking':
+            break
     assert w.controller.state == 'paused'
     assert not w.visuals.motion.busy
     assert w.controller.engine.runtime.snapshot()['a']['value'] == [0, 1, 2]

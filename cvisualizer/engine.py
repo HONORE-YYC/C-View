@@ -50,6 +50,9 @@ class Engine:
         self.program = Program(source)
         self.runtime = Runtime(self.program)
         self._index_bindings = index_bindings(self.program)
+        self.index_lanes = {}
+        for array, _ in self._index_bindings:
+            self.index_lanes[array] = self.index_lanes.get(array, 0) + 1
         self.max_steps, self.count = max_steps, 0
         self.last = None
         self._pending = None

@@ -131,6 +131,12 @@ class MainWindow(QMainWindow):
         left, left_layout = panel('01 / C 代码', '输入 C 代码，逐步观察变量与数据结构的变化')
         self.editor = CodeEditor()
         self.editor.textChanged.connect(self.code_changed)
+        self.jump_button = QPushButton('跳转到当前执行位置')
+        self.jump_button.setEnabled(False)
+        self.jump_button.setToolTip('查看当前高亮的代码，不执行语句或改变演示进度')
+        self.jump_button.clicked.connect(self.editor.jump_to_execution)
+        self.editor.markChanged.connect(self.jump_button.setEnabled)
+        left_layout.addWidget(self.jump_button)
         left_layout.addWidget(self.editor, 1)
         self.filename_label = QLabel('未保存的代码')
         self.filename_label.setObjectName('muted')
@@ -143,7 +149,8 @@ class MainWindow(QMainWindow):
         self.variables.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.variables.verticalHeader().hide()
         self.variables.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.variables.setMaximumHeight(145)
+        self.variables.setFixedHeight(112)
+        self.variables.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         middle_layout.addWidget(self.variables)
         binding_row = QHBoxLayout()
         binding_row.addWidget(QLabel('变量、数组与数据结构'))
@@ -389,6 +396,7 @@ class MainWindow(QMainWindow):
                     item.setBackground(QColor('#dbeafe'))
                 self.variables.setItem(row, col, item)
         self.visuals.render(snapshot, self.bindings, event, pointers=c.engine.index_markers(),
+                            index_lanes=c.engine.index_lanes,
                             duration=max(320, min(1100, int(self.speed.value()*.85))), animate=animate)
         if self.visuals.motion.busy:
             self.buttons['step'].setEnabled(False)
