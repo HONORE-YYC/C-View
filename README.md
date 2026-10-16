@@ -18,7 +18,18 @@ C View 是一款中文桌面教学程序，帮助你通过代码执行过程学�
 
 首次安装需要联网；安装后可以离线使用，不需要安装 C 编译器。建议使用 Python 3.12，最低要求 Python 3.10。
 
-先在本仓库页面选择 **Code → Download ZIP** 并解压，找到包含 `main.py` 和 `requirements.txt` 的项目文件夹。下面以 Windows 路径 `D:\Projects\C-View-main` 为例，请替换为自己的实际路径。
+### 获取项目
+
+推荐使用 Git。在准备存放项目的目录打开终端，执行：
+
+```bash
+git clone https://github.com/HONORE-YYC/C-View.git
+cd C-View
+```
+
+克隆后的 `C-View` 文件夹包含 `main.py` 和 `requirements.txt`。下面以 Windows 路径 `D:\Projects\C-View` 为例，请替换为自己的实际路径。
+
+未安装 Git 的用户，也可以在本仓库页面选择 **Code → Download ZIP**，解压后进入包含 `main.py` 的文件夹。
 
 ### 方案一：使用 Anaconda
 
@@ -27,7 +38,7 @@ C View 是一款中文桌面教学程序，帮助你通过代码执行过程学�
 ```bat
 conda create -n c-view python=3.12 pip -y
 conda activate c-view
-cd /d "D:\Projects\C-View-main"
+cd /d "D:\Projects\C-View"
 python -m pip install -r requirements.txt
 python main.py
 ```
@@ -36,7 +47,7 @@ python main.py
 
 ```bat
 conda activate c-view
-cd /d "D:\Projects\C-View-main"
+cd /d "D:\Projects\C-View"
 python main.py
 ```
 
