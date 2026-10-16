@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "c-view-teaching"
+version = "0.3.0"
+description = "A Python desktop visualizer for a teaching subset of C and linear data structures"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = ["PySide6-Essentials>=6.8,<7", "pycparser>=2.21,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1,<2"]
+
+[project.gui-scripts]
+c-view = "cvisualizer.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["cvisualizer*"]
+
+[tool.setuptools.package-data]
+cvisualizer = ["examples/*.c", "examples/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

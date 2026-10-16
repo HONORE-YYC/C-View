@@ -1,0 +1,213 @@
+"""Gray boxes are uninitialized; green boxes contain stored values.
+
+Read/write borders are independent of initialization and structure membership.
+"""
+from PySide6.QtCore import Qt, QPointF
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPen, QBrush, QPainter
+from PySide6.QtWidgets import QGraphicsView, QGraphicsScene
+
+from .structures import Binding, describe, KINDS
+from .animations import MotionLayer
+
+
+def display(value):
+    if value is None:
+        return '?'
+    if isinstance(value, float):
+        return f'{value:.6g}'
+    return str(value)
+
+
+class MemoryView(QGraphicsView):
+    def __init__(self):
+        super().__init__()
+        self.setScene(QGraphicsScene(self))
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.setBackgroundBrush(QColor('#ffffff'))
+        self.setMinimumWidth(340)
+        self._data = ({}, [], None, {})
+        self._rendering = False
+        self._has_render = False
+        self.boxes = {}
+        self.array_anchors = {}
+        self.motion = MotionLayer(self.scene(), self)
+
+    def label(self, text, x, y, size=10, color='#334155', bold=False):
+        font = QFont('Microsoft YaHei UI', size)
+        font.setBold(bold)
+        item = self.scene().addText(str(text), font)
+        item.setDefaultTextColor(QColor(color))
+        item.setPos(x, y)
+        return item
+
+    def box(self, name, value, x, y, width, read=False, written=False):
+        fill = '#e5e7eb' if value is None else '#dcfce7'
+        border = '#a1a8b3' if value is None else '#86bda4'
+        if read:
+            border = '#60a5fa'
+        if written:
+            border = '#f59e0b'
+        rect = self.scene().addRect(x, y, width, 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(QColor(fill)))
+        rect.setData(0, name)
+        text = name if value is None else f'{name} = {display(value)}'
+        rect.setToolTip(text + ('（未初始化）' if value is None else ''))
+        item = self.label(text, x+6, y+8, 10, '#172b4d', True)
+        item.setToolTip(rect.toolTip())
+        item.setPlainText(QFontMetricsF(item.font()).elidedText(text, Qt.TextElideMode.ElideRight, width-14))
+        return rect
+
+    @staticmethod
+    def activity(name, index, cell, event):
+        if not event or event.variables.get(name, {}).get('identity') != cell.get('identity'):
+            return False, False
+        return ((name, index) in event.reads,
+                (name, index) in event.writes or (name, None) in event.writes)
+
+    def render(self, variables, bindings, event=None, pointers=None, duration=600, animate=True, force=False):
+        pointers = pointers or {}
+        data = (variables, list(bindings), event, pointers)
+        if self._rendering:
+            return
+        if self._has_render and not force and data == self._data:
+            return
+        self._has_render = True
+        previous = {key: QPointF(item.pos()) for key, item in self.motion.pointers.items()}
+        was_busy = self.motion.busy
+        visible_before = set(self.boxes)
+        same_event = event is self._data[2]
+        self._data = data
+        self._rendering = True
+        try:
+            self.motion.clear()
+            self.boxes, self.array_anchors = {}, {}
+            self._draw(variables, bindings, event)
+            transfers = []
+            if event and animate and not same_event:
+                for source, target in dict.fromkeys(event.transfers):
+                    if source in visible_before and source in self.boxes and target in self.boxes:
+                        transfers.append((self.boxes[source].rect(), self.boxes[target].rect()))
+            destinations = {}
+            lanes = {}
+            for key, index in pointers.items():
+                array, identity, counter, _ = key
+                lane = lanes.get((array, identity), 0)
+                lanes[array, identity] = lane+1
+                box = self.boxes.get((array, index, identity))
+                valid = box is not None
+                label = f'{counter} = {index}'
+                if valid:
+                    rect = box.rect()
+                    point = QPointF(rect.left()+18+min(lane*28, rect.width()-40), rect.top()-4)
+                elif (array, identity) in self.array_anchors:
+                    point = self.array_anchors[array, identity] + QPointF(0, lane*22)
+                    label += '（越界）' if not 0 <= index < len(variables[array]['value']) else '（未绘制）'
+                else:
+                    continue
+                destinations[key] = (point, label, lane if valid else 0, valid)
+            self.motion.start(transfers, destinations, previous, duration, animate and not same_event)
+        finally:
+            self._rendering = False
+        if was_busy and not self.motion.busy:
+            self.motion.settled.emit()
+
+    def _draw(self, variables, bindings, event):
+        self.scene().clear()
+        width = max(300, self.viewport().width()-28)
+        columns = max(2, int((width-24)//150))
+        box_width = (width-28)/columns-12
+        y = 12
+        if not variables:
+            self.label('每一步，都看得见', 18, y+12, 18, '#0f766e', True)
+            item = self.label('定义变量或数组后，这里会生成方框。\n灰色：未赋值，仅显示名字\n绿色：已有值，显示「名字 = 值」\n蓝色边框：读取  ·  橙色边框：写入', 18, y+58, 10)
+            item.setTextWidth(width-36)
+            self.scene().setSceneRect(0, 0, width, 250)
+            return
+        if event:
+            title = self.label(f'本步：{event.text}', 16, y, 10, '#0f766e', True)
+            title.setTextWidth(width-32)
+            y += title.boundingRect().height()+4
+            changes = []
+            for name, index in dict.fromkeys(event.writes):
+                after_cell = event.variables.get(name, {})
+                before_cell = event.before.get(name, {})
+                if before_cell.get('identity') != after_cell.get('identity'):
+                    before_cell = {}
+                old, new = before_cell.get('value'), after_cell.get('value')
+                if index is not None:
+                    old = old[index] if isinstance(old, list) and index < len(old) else None
+                    new = new[index] if isinstance(new, list) and index < len(new) else None
+                if isinstance(new, list):
+                    continue
+                target = name + (f'[{index}]' if index is not None else '')
+                changes.append(f'{target}: {display(old) if old is not None else "未赋值"} → {display(new) if new is not None else "未赋值"}')
+            if changes:
+                info = self.label('  ·  '.join(changes[:8]), 16, y, 9, '#64748b')
+                info.setTextWidth(width-32)
+                y += info.boundingRect().height()+6
+            y += 12
+        scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list)]
+        if scalars:
+            self.label('变量', 16, y, 12, '#0f172a', True)
+            y += 38
+            for pos, (name, cell) in enumerate(scalars):
+                x = 18+(pos % columns)*(box_width+12)
+                row_y = y+(pos//columns)*63
+                read, written = self.activity(name, None, cell, event)
+                self.boxes[name, None, cell['identity']] = self.box(name, cell['value'], x, row_y, box_width, read, written)
+            y += ((len(scalars)+columns-1)//columns)*63+16
+        bound = {b.array: b for b in bindings}
+        for name, cell in variables.items():
+            if not isinstance(cell['value'], list):
+                continue
+            model = describe(bound.get(name, Binding(name)), variables)
+            self.label(f'{name}  /  {KINDS[model.kind]}', 16, y, 13, '#0f172a', True)
+            self.array_anchors[name, cell['identity']] = QPointF(width-170, y+20)
+            y += 34
+            note = self.label(model.error or model.note or f'capacity = {len(model.values)}', 16, y, 9,
+                              '#b45309' if model.error else '#64748b')
+            note.setTextWidth(width-30)
+            pointer_count = sum(key[0] == name and key[1] == cell['identity'] for key in self._data[3])
+            marker_space = 20*max(0, pointer_count-1)
+            y += note.boundingRect().height()+42+marker_space
+            active = set(model.active)
+            visible = list(range(min(64, len(model.values))))
+            vertical = model.kind == 'stack'
+            if vertical:
+                visible.reverse()
+            max_bottom = y
+            for pos, index in enumerate(visible):
+                x = 24 if vertical else 18+(pos % columns)*(box_width+12)
+                cy = y+pos*(96+marker_space) if vertical else y+(pos//columns)*(112+marker_space)
+                read, written = self.activity(name, index, cell, event)
+                self.boxes[name, index, cell['identity']] = self.box(f'{name}[{index}]', model.values[index], x, cy, box_width, read, written)
+                if model.kind != 'array':
+                    self.label('有效' if index in active else '空闲位', x+6 if not vertical else x+box_width+14,
+                               cy+45 if not vertical else cy+11, 8, '#64748b')
+                markers = model.markers.get(index, [])
+                if markers:
+                    self.label(' / '.join(markers), x+box_width+75 if vertical else x,
+                               cy+8 if vertical else cy+60, 9, '#0f766e', True)
+                max_bottom = max(max_bottom, cy+(58 if vertical else 82))
+            y = max_bottom+10
+            if len(model.values) > 64:
+                self.label(f'仅绘制前 64 / {len(model.values)} 个单元；执行器处理完整数组', 18, y, 9, '#64748b')
+                y += 32
+            if model.kind in ('list', 'queue'):
+                order = ' → '.join(display(v) for v in model.logical[:20]) or '（空）'
+                if len(model.logical) > 20:
+                    order += ' → …'
+                text = self.label('逻辑顺序：'+order, 18, y, 9, '#0f766e')
+                text.setTextWidth(width-36)
+                y += text.boundingRect().height()+12
+            self.scene().addLine(16, y+4, width-4, y+4, QPen(QColor('#e2e8f0')))
+            y += 30
+        self.scene().setSceneRect(0, 0, width, y)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.render(*self._data, animate=False, force=True)
+
+    def closeEvent(self, event):
+        self.motion.clear()
+        super().closeEvent(event)

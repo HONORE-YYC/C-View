@@ -1,0 +1,5 @@
+[
+  {"array": "data", "kind": "list", "length": "length"},
+  {"array": "stack", "kind": "stack", "top": "top"},
+  {"array": "queue", "kind": "queue", "front": "front", "rear": "rear"}
+]
