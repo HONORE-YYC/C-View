@@ -1,18 +1,11 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-import pytest
 from PySide6.QtCore import QAbstractAnimation
-from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 from cvisualizer.engine import Engine
 from cvisualizer.views import MemoryView
 from cvisualizer.window import MainWindow
-
-
-@pytest.fixture(scope='module')
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def render_step(view, engine):

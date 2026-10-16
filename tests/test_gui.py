@@ -1,14 +1,7 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-import pytest
-from PySide6.QtWidgets import QApplication
 from cvisualizer.window import MainWindow
-
-
-@pytest.fixture(scope='module')
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def test_window_steps_highlights_and_renders_arrays(app, tmp_path):

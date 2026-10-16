@@ -5,13 +5,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
 from cvisualizer.editor import CodeEditor
-
-
-@pytest.fixture(scope='module')
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture

@@ -1,16 +1,10 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-import pytest
-from PySide6.QtWidgets import QApplication, QGraphicsRectItem
+from PySide6.QtWidgets import QGraphicsRectItem
 from cvisualizer.views import MemoryView
 from cvisualizer.engine import Engine
 from cvisualizer.structures import Binding
-
-
-@pytest.fixture(scope='module')
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def boxes(view):
