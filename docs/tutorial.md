@@ -118,7 +118,7 @@ python -m pytest -q
 
 示例测试还检查最终结构内容，而不只是“运行没报错”。例如队列示例必须得到 `[30, 40, 50, 60]` 的逻辑顺序，否则回绕实现可能有问题。
 
-`pyproject.toml` 定义依赖、命令入口和示例包数据；`.github/workflows/tests.yml` 在 push 和 pull request 时运行测试。上传步骤见 README。
+`pyproject.toml` 定义依赖、命令入口和示例包数据；`.github/workflows/tests.yml` 在 push 和 pull request 时运行测试。后续提交与发布步骤见[开发与维护说明](development.md)。
 
 ## 下一步怎么扩展
 
