@@ -39,6 +39,12 @@ def index_bindings(program):
 
     for node in program.globals:
         visit(node)
+    for function in program.functions.values():
+        scopes.append({})
+        for param in function.params:
+            visit(param)
+        visit(function.node.body)
+        scopes.pop()
     visit(program.main)
     return bindings
 

@@ -13,11 +13,17 @@ class Controller:
         self.state, self.message = 'ready', '准备就绪'
         self.error = None
         self._seek_target = None
+        self._play_target = False
+        self._detail_playing = False
+        self._target_function = None
 
     def reset(self):
         self.engine = Engine(self.source, self.max_steps)
+        self.targets = self.engine.program.targets()
         self.state, self.message, self.error = 'ready', '已重置', None
         self._seek_target = None
+        self._play_target = False
+        self._detail_playing = False
 
     def play(self):
         if self.state in ('finished', 'stopped', 'error'):
@@ -32,15 +38,24 @@ class Controller:
     def stop(self):
         self.state, self.message = 'stopped', '已停止，保留最后画面；再次播放从头开始'
         self._seek_target = None
+        self._play_target = False
+        self._detail_playing = False
 
     def seek(self, location):
         if self.state in ('finished', 'stopped', 'error'):
             self.reset()
         self._seek_target = (location.line, location.column, location.kind)
+        self._play_target = False
+        self._detail_playing = False
+        self._target_function = self.engine.program.target_functions.get(location)
         self.state, self.message = 'seeking', f'正在定位第 {location.line} 行…'
 
-    def _advance(self):
-        event = self.engine.step()
+    def play_statement(self, location):
+        self.seek(location)
+        self._play_target = True
+
+    def _advance(self, expand_calls=False):
+        event = self.engine.step(expand_calls=expand_calls)
         if self.engine.peek() is None:
             self.state = 'finished'
             self.message = '程序已结束' if not self._seek_target else '程序已结束，目标语句未到达；可重置后重试'
@@ -51,14 +66,22 @@ class Controller:
         self.error = error
         self.state, self.message = 'error', str(error)
         self._seek_target = None
+        self._play_target = False
+        self._detail_playing = False
 
-    def step(self):
+    def step(self, expand_calls=False):
         if self.state in ('finished', 'stopped', 'error'):
             self.reset()
         self._seek_target = None
         self.state, self.message = 'paused', '单步执行完成'
         try:
-            return self._advance()
+            event = self._advance(expand_calls or self.engine.has_detail)
+            if expand_calls and self.engine.has_detail:
+                self._detail_playing = True
+                self.state, self.message = 'running', '正在展开函数演示'
+            elif not self.engine.has_detail:
+                self._detail_playing = False
+            return event
         except CError as error:
             self._fail(error)
             return None
@@ -67,9 +90,14 @@ class Controller:
         events = []
         try:
             if self.state == 'running':
-                event = self._advance()
+                detailing = self._detail_playing
+                event = self._advance(expand_calls=detailing)
                 if event:
                     events.append(event)
+                if detailing and not self.engine.has_detail:
+                    self._detail_playing = False
+                    if self.state != 'finished':
+                        self.state, self.message = 'paused', '函数演示完成，已返回调用处'
             elif self.state == 'seeking':
                 deadline = monotonic() + 0.012
                 for _ in range(batch):
@@ -80,10 +108,26 @@ class Controller:
                             self.state = 'paused'
                             self.message = f'已到第 {loc.line} 行第 {loc.column} 列，尚未执行；点击「单步」演示'
                             self._seek_target = None
+                            if self._play_target:
+                                self._play_target = False
+                                event = self.step(expand_calls=True)
+                                if event:
+                                    events.append(event)
                             break
-                    event = self._advance()
+                    expand = self.engine.has_detail or (
+                        pending is not None and bool(self._target_function)
+                        and self.engine.program.call_reaches(pending.functions, self._target_function))
+                    event = self._advance(expand_calls=expand)
                     if event:
                         events.append(event)
+                        if event.kind == 'function' and (event.line, event.column, event.kind) == self._seek_target:
+                            self._seek_target = None
+                            self.state, self.message = 'paused', '已进入函数，使用本次调用的实际参数'
+                            if self._play_target:
+                                self._play_target = False
+                                self._detail_playing = True
+                                self.state = 'running'
+                            break
                     if self.state != 'seeking' or monotonic() >= deadline:
                         break
         except CError as error:

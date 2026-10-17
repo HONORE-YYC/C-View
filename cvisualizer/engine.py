@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Callable
+from collections import deque
 
 from pycparser import c_ast as ast
 
@@ -14,6 +15,7 @@ from .motion import index_bindings, index_markers
 class Action:
     location: Location
     run: Callable
+    functions: tuple = ()
 
     @property
     def line(self):
@@ -38,17 +40,27 @@ class Event:
     number: int = 0
     before: dict = field(default_factory=dict)
     transfers: list = field(default_factory=list)
+    calls: list = field(default_factory=list)
+    function: str = ''
+    expanded: bool = False
 
 
 class _Flow(Exception):
-    def __init__(self, kind):
-        self.kind = kind
+    def __init__(self, kind, value=None):
+        self.kind, self.value = kind, value
 
 
 class Engine:
     def __init__(self, source, max_steps=100000):
         self.program = Program(source)
         self.runtime = Runtime(self.program)
+        from .function_execution import FunctionExecution
+        self.functions = FunctionExecution(self)
+        self.runtime.call_function = self.functions.call
+        self._detail = deque()
+        self._trace, self._calls = [], []
+        self._record_detail = False
+        self._operations = 0
         self._index_bindings = index_bindings(self.program)
         self.index_lanes = {}
         for array, _ in self._index_bindings:
@@ -63,6 +75,9 @@ class Engine:
         return index_markers(self._index_bindings, self.runtime.snapshot())
 
     def peek(self):
+        if self._detail:
+            event = self._detail[0][0]
+            return Action(Location(event.line, event.column, event.text, event.kind), lambda: None)
         if self._pending is None and not self.finished:
             try:
                 self._pending = next(self._iterator)
@@ -70,32 +85,85 @@ class Engine:
                 self.finished = True
         return self._pending
 
-    def step(self):
+    @property
+    def has_detail(self):
+        return bool(self._detail)
+
+    def display_snapshot(self):
+        return self.last.variables if self.last and self.last.function else self.runtime.snapshot()
+
+    def _state(self):
+        rt = self.runtime
+        return deepcopy((rt.scopes, rt.output, rt.random_state, rt.next_identity))
+
+    def _restore(self, state):
+        rt = self.runtime
+        rt.scopes, rt.output, rt.random_state, rt.next_identity = deepcopy(state)
+
+    def _consume(self, location):
+        if self._operations >= self.max_steps:
+            raise CError(f'达到 {self.max_steps} 步数限制，请检查循环条件', location.line, location.column)
+        self._operations += 1
+
+    def capture_detail(self, event):
+        if self._record_detail:
+            if len(self._trace) >= 2000:
+                raise CError('单次函数展开超过 2000 步，请缩小示例或使用快速演示', event.line, event.column)
+            self._trace.append((event, self._state()))
+
+    def step(self, expand_calls=False):
+        if self._detail:
+            if expand_calls:
+                event, state = self._detail.popleft()
+            else:
+                event, state = self._detail[-1]
+                self._detail.clear()
+            self._restore(state)
+            self.count += 1
+            event.number = self.count
+            self.last = event
+            return event
         action = self.peek()
         if action is None:
             return None
         loc = action.location
-        if self.count >= self.max_steps:
-            raise CError(f'达到 {self.max_steps} 步数限制，请检查循环条件', loc.line, loc.column)
+        self._consume(loc)
         rt = self.runtime
-        backup, old_output, old_random = deepcopy(rt.scopes), rt.output, rt.random_state
+        backup = self._state()
         before = rt.snapshot()
+        self._trace, self._calls = [], []
+        self._record_detail = expand_calls
         rt.reads, rt.writes = [], []
         rt.transfers = []
         try:
             description = action.run()
         except CError:
-            rt.scopes, rt.output, rt.random_state = backup, old_output, old_random
+            self._restore(backup)
+            self._trace.clear()
             raise
-        self.count += 1
-        self.last = Event(loc.line, loc.column, loc.text, loc.kind, str(description),
-                          rt.snapshot(), rt.output, list(rt.reads), list(rt.writes), self.count, before,
-                          list(rt.transfers))
+        event = Event(loc.line, loc.column, loc.text, loc.kind, str(description),
+                      rt.snapshot(), rt.output, list(rt.reads), list(rt.writes), 0, before,
+                      list(rt.transfers), list(self._calls), expanded=bool(self._trace))
         self._pending = None
+        if self._trace:
+            self._detail.extend(self._trace)
+            self._detail.append((event, self._state()))
+            self._trace = []
+            return self.step(expand_calls=True)
+        self.count += 1
+        event.number = self.count
+        self.last = event
         return self.last
 
     def _action(self, node, fn, kind='statement'):
-        return Action(self.program.location(node, kind), fn)
+        calls = []
+        def visit(current):
+            if isinstance(current, ast.FuncCall) and isinstance(current.name, ast.ID) and current.name.name in self.program.functions:
+                calls.append(current.name.name)
+            for _, child in current.children():
+                visit(child)
+        visit(node)
+        return Action(self.program.location(node, kind), fn, tuple(dict.fromkeys(calls)))
 
     def _program(self):
         for node in self.program.globals:
@@ -114,7 +182,10 @@ class Engine:
             value = self.runtime.evaluate(expr) if expr is not None else 1
             result[0] = self.runtime.truth(value, expr or origin)
             return f'条件结果 = {value} → ' + ('真' if result[0] else '假')
-        return self._action(expr or origin, check, 'condition')
+        action = self._action(expr or origin, check, 'condition')
+        if expr is None:
+            action.functions = ()
+        return action
 
     def _walk(self, node):
         if node is None:
@@ -159,14 +230,17 @@ class Engine:
                 rt.scopes.pop()
         elif isinstance(node, (ast.Break, ast.Continue, ast.Return)):
             kind = type(node).__name__.lower()
+            returned = [None]
             def perform():
                 if isinstance(node, ast.Return) and node.expr:
-                    value = rt.convert(rt.evaluate(node.expr), 'int', node)
-                    return f'return {value}：结束程序'
+                    type_name = self.functions.return_type
+                    value = rt.convert(rt.evaluate(node.expr), type_name, node)
+                    returned[0] = value
+                    return f'return {value}：' + ('返回调用处' if self.functions.stack else '结束程序')
                 return {'break': 'break：退出本层循环', 'continue': 'continue：进入下一轮',
-                        'return': 'return：结束程序'}[kind]
+                        'return': 'return：返回调用处' if self.functions.stack else 'return：结束程序'}[kind]
             yield self._action(node, perform)
-            raise _Flow(kind)
+            raise _Flow(kind, returned[0])
         elif isinstance(node, ast.EmptyStatement):
             yield self._action(node, lambda: '空语句')
         else:
@@ -175,5 +249,5 @@ class Engine:
     def _expression(self, node):
         value = self.runtime.evaluate(node)
         if value is None:
-            return f'{self.program.location(node).text}：已设置随机种子'
+            return f'{self.program.location(node).text}：执行完成'
         return f'{self.program.location(node).text} → {value}'

@@ -12,9 +12,9 @@ def smooth(value):
 
 
 class TransferArrow(QGraphicsPathItem):
-    def __init__(self, source, target):
+    def __init__(self, source, target, color='#16a34a'):
         super().__init__()
-        color = QColor('#16a34a')
+        color = QColor(color)
         self.setPen(QPen(color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         self.head = QGraphicsPolygonItem(self)
         self.head.setPen(QPen(Qt.PenStyle.NoPen))
@@ -89,6 +89,7 @@ class MotionLayer(QObject):
         self.scene = scene
         self.arrows, self.pointers, self.destinations = [], {}, {}
         self.origins = {}
+        self.summary = None
         self.animation = QVariantAnimation(self)
         self.animation.setStartValue(0.)
         self.animation.setEndValue(1.)
@@ -101,12 +102,15 @@ class MotionLayer(QObject):
 
     def clear(self):
         self.animation.stop()
+        if self.summary is not None:
+            self.summary.close()
+            self.summary = None
         for item in self.arrows + list(self.pointers.values()):
             if item.scene() is self.scene:
                 self.scene.removeItem(item)
         self.arrows, self.pointers, self.destinations, self.origins = [], {}, {}, {}
 
-    def start(self, transfers, pointers, previous, duration, animate=True):
+    def start(self, transfers, pointers, previous, duration, animate=True, call_summary=None):
         self.clear()
         moving = False
         for key, (point, label, lane, valid) in pointers.items():
@@ -122,7 +126,11 @@ class MotionLayer(QObject):
                 arrow = TransferArrow(source, target)
                 self.scene.addItem(arrow)
                 self.arrows.append(arrow)
-        if self.arrows or moving:
+            if call_summary and call_summary.get('calls'):
+                from .function_animation import FunctionSummary
+                self.summary = FunctionSummary(self.scene, call_summary)
+                duration = max(duration, 900, 650*len(self.summary.calls)+400)
+        if self.arrows or moving or self.summary is not None:
             self.animation.setDuration(max(1, int(duration)))
             self.animation.start()
 
@@ -133,12 +141,17 @@ class MotionLayer(QObject):
             item.setPos(start + (end-start)*t)
         for arrow in self.arrows:
             arrow.frame(progress)
+        if self.summary is not None:
+            self.summary.frame(progress)
 
     def _complete(self):
         self.frame(1.)
         for arrow in self.arrows:
             self.scene.removeItem(arrow)
         self.arrows = []
+        if self.summary is not None:
+            self.summary.close()
+            self.summary = None
         self.settled.emit()
 
     def finish(self):

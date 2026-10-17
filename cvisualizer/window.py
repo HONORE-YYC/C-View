@@ -2,17 +2,17 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QAbstractAnimation
-from PySide6.QtGui import QColor, QFont, QAction, QKeySequence
+from PySide6.QtGui import QColor, QFont, QAction, QKeySequence, QCursor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSlider, QSplitter, QPlainTextEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFileDialog, QMessageBox, QDialog, QFrame, QAbstractItemView,
+    QHeaderView, QFileDialog, QMessageBox, QDialog, QFrame, QAbstractItemView, QMenu,
 )
 
 from .bindings import BindingDialog, read_bindings, write_bindings
 from .controller import Controller
 from .editor import CodeEditor
-from .language import CError
+from .language import CError, Program
 from .views import MemoryView, display
 
 
@@ -69,6 +69,10 @@ class MainWindow(QMainWindow):
         self.path = None
         self._loading = False
         self._bindings_dirty = False
+        self._preview_program = None
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self.update_code_map)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
         central = QWidget()
@@ -91,7 +95,7 @@ class MainWindow(QMainWindow):
         for filename, label in [('basics.c', '01 变量、运算与循环'), ('list.c', '02 顺序表插入与删除'),
                                 ('stack.c', '03 栈的入栈与出栈'), ('queue.c', '04 循环队列与回绕'),
                                 ('mixed.c', '05 同一程序，多种结构'), ('macros.c', '06 宏与随机数'),
-                                ('animation.c', '07 赋值与下标动画')]:
+                                ('animation.c', '07 赋值与下标动画'), ('functions.c', '08 函数与数组参数')]:
             self.examples.addItem(label, filename)
         self.examples.activated.connect(self.open_example)
         header.addWidget(self.examples)
@@ -112,9 +116,6 @@ class MainWindow(QMainWindow):
                 button.setObjectName('primary')
             self.buttons[key] = button
             controls.addWidget(button)
-        self.locate_button = QPushButton('定位光标所在语句')
-        self.locate_button.clicked.connect(self.locate_cursor)
-        controls.addWidget(self.locate_button)
         controls.addStretch()
         self.speed_label = QLabel('间隔 600 ms')
         self.speed = QSlider(Qt.Orientation.Horizontal)
@@ -131,12 +132,21 @@ class MainWindow(QMainWindow):
         left, left_layout = panel('01 / C 代码', '输入 C 代码，逐步观察变量与数据结构的变化')
         self.editor = CodeEditor()
         self.editor.textChanged.connect(self.code_changed)
+        self.editor.playLineRequested.connect(self.play_line)
         self.jump_button = QPushButton('跳转到当前执行位置')
         self.jump_button.setEnabled(False)
         self.jump_button.setToolTip('查看当前高亮的代码，不执行语句或改变演示进度')
         self.jump_button.clicked.connect(self.editor.jump_to_execution)
         self.editor.markChanged.connect(self.jump_button.setEnabled)
         left_layout.addWidget(self.jump_button)
+        self.function_offer = QPushButton('展开函数演示')
+        self.function_offer.setToolTip('使用本次调用的实际参数，逐句演示函数内部；再次点击单步则快速演示')
+        self.function_offer.clicked.connect(self.expand_function)
+        policy = self.function_offer.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.function_offer.setSizePolicy(policy)
+        self.function_offer.hide()
+        left_layout.addWidget(self.function_offer)
         left_layout.addWidget(self.editor, 1)
         self.filename_label = QLabel('未保存的代码')
         self.filename_label.setObjectName('muted')
@@ -209,7 +219,7 @@ class MainWindow(QMainWindow):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         root.addWidget(self.status)
-        footer = QLabel('教学子集：变量、数组、循环、#define、printf、abs/rand/srand。兼容 cstdlib / stdlib.h；暂不支持指针与 struct，浮点按宿主精度近似。')
+        footer = QLabel('教学子集：变量、数组、循环、非递归函数、#define、printf、abs/rand/srand。兼容 cstdlib / stdlib.h；暂不支持指针与 struct。')
         footer.setObjectName('muted')
         footer.setWordWrap(True)
         root.addWidget(footer)
@@ -235,6 +245,7 @@ class MainWindow(QMainWindow):
         self._loading = False
         self._bindings_dirty = False
         self.reset()
+        self.update_code_map()
         self.filename_label.setText(str(self.path) if self.path else '未保存的代码')
 
     def code_changed(self):
@@ -242,6 +253,9 @@ class MainWindow(QMainWindow):
             return
         self.timer.stop()
         self.controller = None
+        self._preview_program = None
+        self.editor.set_playable_lines([])
+        self.preview_timer.start(180)
         self.clear_display()
         self.status.setText('代码已修改，运行时将从头开始')
         self.refresh()
@@ -252,7 +266,7 @@ class MainWindow(QMainWindow):
         self.log.clear()
         self.output.clear()
         self.variables.setRowCount(0)
-        self.visuals.render({}, self.bindings)
+        self.visuals.render({}, self.bindings, functions=self.function_names())
         self.step_label.setText('STEP 0000')
         self.explanation.setText('点击「完整演示」或「单步」开始。')
         self.next_label.setText('尚未开始')
@@ -262,6 +276,8 @@ class MainWindow(QMainWindow):
             return True
         try:
             self.controller = Controller(self.editor.toPlainText())
+            self._preview_program = self.controller.engine.program
+            self.editor.set_playable_lines(loc.line for loc in self.controller.targets)
             self.targets.clear()
             for loc in self.controller.targets:
                 one_line = loc.text.replace('\n', ' ')
@@ -275,9 +291,49 @@ class MainWindow(QMainWindow):
     def prepare_targets(self):
         return self.ensure_controller()
 
+    def function_names(self):
+        return tuple(self._preview_program.functions) if self._preview_program else ()
+
+    def update_code_map(self):
+        try:
+            self._preview_program = self.controller.engine.program if self.controller else Program(self.editor.toPlainText())
+        except CError:
+            self._preview_program = None
+        targets = self._preview_program.targets() if self._preview_program else []
+        self.editor.set_playable_lines(loc.line for loc in targets)
+        if not self.controller:
+            self.visuals.render({}, self.bindings, functions=self.function_names())
+
+    def play_line(self, line):
+        if self.visuals.motion.busy or (self.controller and self.controller.state in ('running', 'seeking')):
+            return
+        if not self.ensure_controller():
+            return
+        targets = [loc for loc in self.controller.targets if loc.line == line]
+        if len(targets) == 1:
+            self.play_location(targets[0])
+        elif targets:
+            self._line_menu = QMenu(self)
+            for loc in targets:
+                action = self._line_menu.addAction(f'{loc.column}: {loc.text[:80]}')
+                action.triggered.connect(lambda checked=False, target=loc: self.play_location(target))
+            self._line_menu.popup(QCursor.pos())
+
+    def play_location(self, location):
+        self.prepare_restart()
+        self.controller.play_statement(location)
+        self.refresh()
+
+    def expand_function(self):
+        if self.visuals.motion.busy or not self.ensure_controller():
+            return
+        event = self.controller.step(expand_calls=True)
+        self.record([event] if event else [])
+        self.refresh()
+
     def prepare_restart(self):
         if self.controller and self.controller.state in ('finished', 'stopped', 'error'):
-            self.visuals.render({}, self.bindings)
+            self.visuals.render({}, self.bindings, functions=self.function_names())
             self.log.clear()
             self.output.clear()
 
@@ -309,6 +365,12 @@ class MainWindow(QMainWindow):
             return
         if self.ensure_controller():
             self.prepare_restart()
+            pending = self.controller.engine.peek()
+            if self.controller.state == 'ready' and pending and pending.functions:
+                self.controller.state = 'paused'
+                self.controller.message = '即将调用函数：可展开演示，或再次点击单步快速演示'
+                self.refresh()
+                return
             event = self.controller.step()
             self.record([event] if event else [])
             self.refresh()
@@ -327,21 +389,6 @@ class MainWindow(QMainWindow):
             self.controller.seek(self.targets.currentData())
             self.refresh()
 
-    def locate_cursor(self):
-        line = self.editor.textCursor().blockNumber() + 1
-        column = self.editor.textCursor().positionInBlock() + 1
-        if not self.ensure_controller():
-            return
-        candidates = [(i, self.targets.itemData(i)) for i in range(self.targets.count())
-                      if self.targets.itemData(i).line == line]
-        if not candidates:
-            self.status.setText('当前行没有可执行语句，请将光标放在声明、运算或循环条件所在行。')
-            return
-        preceding = [(i, loc) for i, loc in candidates if loc.column <= column]
-        index = max(preceding, key=lambda pair: pair[1].column)[0] if preceding else candidates[0][0]
-        self.targets.setCurrentIndex(index)
-        self.seek()
-
     def speed_changed(self, value):
         self.speed_label.setText(f'间隔 {value} ms')
         if self.timer.isActive() and self.controller.state == 'running':
@@ -352,8 +399,9 @@ class MainWindow(QMainWindow):
             if self.visuals.motion.busy:
                 return
             seeking = self.controller.state == 'seeking'
+            playing_target = self.controller._play_target
             self.record(self.controller.tick())
-            self.refresh(animate=not seeking)
+            self.refresh(animate=not seeking or (playing_target and self.controller.state != 'seeking'))
 
     def record(self, events):
         for event in events:
@@ -371,7 +419,8 @@ class MainWindow(QMainWindow):
         self.buttons['step'].setEnabled(not active and not busy)
         self.buttons['play'].setEnabled(not active and (not busy or state == 'paused' or animation_paused))
         self.buttons['play'].setText('继续演示' if state == 'paused' or animation_paused else '完整演示')
-        self.locate_button.setEnabled(not active)
+        self.editor.set_play_enabled(not active and not busy)
+        self.function_offer.hide()
         self.seek_button.setEnabled(not active)
         if active:
             interval = 10 if state == 'seeking' else self.speed.value()
@@ -383,22 +432,26 @@ class MainWindow(QMainWindow):
             return
         self.status.setText(f'{STATES[state]}  ·  {c.message}')
         event = c.engine.last
-        snapshot = c.engine.runtime.snapshot()
+        snapshot = c.engine.display_snapshot()
         rows = [(name, cell) for name, cell in snapshot.items() if not isinstance(cell['value'], list)]
         self.variables.setRowCount(len(rows))
         for row, (name, cell) in enumerate(rows):
             same_cell = event and event.variables.get(name, {}).get('identity') == cell['identity']
             for col, value in enumerate([name, cell['type'], display(cell['value'])]):
                 item = QTableWidgetItem(value)
-                if same_cell and (name, None) in event.writes:
+                if event and event.function:
+                    item.setBackground(QColor('#f3e8ff'))
+                elif same_cell and (name, None) in event.writes:
                     item.setBackground(QColor('#fef3c7'))
                 elif same_cell and (name, None) in event.reads:
                     item.setBackground(QColor('#dbeafe'))
                 self.variables.setItem(row, col, item)
         self.visuals.render(snapshot, self.bindings, event, pointers=c.engine.index_markers(),
                             index_lanes=c.engine.index_lanes,
+                            functions=self.function_names(),
                             duration=max(320, min(1100, int(self.speed.value()*.85))), animate=animate)
         if self.visuals.motion.busy:
+            self.editor.set_play_enabled(False)
             self.buttons['step'].setEnabled(False)
             self.buttons['pause'].setEnabled(True)
             self.buttons['stop'].setEnabled(True)
@@ -419,6 +472,9 @@ class MainWindow(QMainWindow):
             self.editor.mark(event.line, event.column)
         pending = c.engine.peek() if state != 'error' else None
         if pending:
+            if pending.functions and not active and not self.visuals.motion.busy and not c.engine.has_detail:
+                self.function_offer.setText('展开函数演示（单步则快速演示）')
+                self.function_offer.show()
             self.next_label.setText(f'下一步 {pending.line}:{pending.column}  {pending.location.text[:180]}')
             if state == 'paused' and '尚未执行' in c.message:
                 self.editor.mark(pending.line, pending.column, '#dbeafe')

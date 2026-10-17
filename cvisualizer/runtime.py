@@ -35,6 +35,7 @@ class Runtime:
         self.random_state = 1
         self.transfers = []
         self._source_frames = []
+        self.call_function = None
 
     def fail(self, node, message):
         self.program.fail(node, message)
@@ -234,6 +235,8 @@ class Runtime:
                 self.evaluate_sources(expr)
             return self.evaluate(node.exprs[-1]) if node.exprs else 0
         if isinstance(node, ast.FuncCall):
+            if node.name.name in self.program.functions:
+                return self.call_function(node)
             return self.printf(node) if node.name.name == 'printf' else self.stdlib(node)
         self.fail(node, f'此处不能执行 {type(node).__name__}')
 

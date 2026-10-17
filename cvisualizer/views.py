@@ -30,11 +30,16 @@ class MemoryView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
-        self._data = ({}, [], None, {}, {})
+        self._data = ({}, [], None, {}, {}, ())
         self._rendering = False
         self._has_render = False
         self.boxes = {}
         self.array_anchors = {}
+        self.function_boxes = {}
+        self._context = ''
+        self._view_offsets = {}
+        self._restoring_offsets = None
+        self._function_context = False
         self.motion = MotionLayer(self.scene(), self)
         self._content_parent = None
         self._sections = {}
@@ -76,6 +81,8 @@ class MemoryView(QGraphicsView):
         bar.blockSignals(True)
         bar.setPageStep(int(rect.height()))
         bar.setRange(0, max(0, int(bottom-rect.bottom())))
+        if self._restoring_offsets is not None:
+            bar.setValue(self._restoring_offsets[0 if name == 'scalar' else 1])
         bar.blockSignals(False)
         bar.setGeometry(int(rect.right()), int(rect.top()), 16, int(rect.height()))
         bar.setVisible(bar.maximum() > 0)
@@ -110,9 +117,11 @@ class MemoryView(QGraphicsView):
         item.setPos(x, y)
         return item
 
-    def box(self, name, value, x, y, width, read=False, written=False):
+    def box(self, name, value, x, y, width, read=False, written=False, purple=False):
         fill = '#e5e7eb' if value is None else '#dcfce7'
         border = '#a1a8b3' if value is None else '#86bda4'
+        if purple or self._function_context:
+            fill, border = '#f3e8ff', '#a855f7'
         if read:
             border = '#60a5fa'
         if written:
@@ -125,6 +134,7 @@ class MemoryView(QGraphicsView):
         item = self.label(text, x+6, y+8, 10, '#172b4d', True)
         item.setToolTip(rect.toolTip())
         item.setPlainText(QFontMetricsF(item.font()).elidedText(text, Qt.TextElideMode.ElideRight, width-14))
+        rect.value_label = item
         return rect
 
     @staticmethod
@@ -134,14 +144,24 @@ class MemoryView(QGraphicsView):
         return ((name, index) in event.reads,
                 (name, index) in event.writes or (name, None) in event.writes)
 
-    def render(self, variables, bindings, event=None, pointers=None, index_lanes=None, duration=600, animate=True, force=False):
+    def render(self, variables, bindings, event=None, pointers=None, index_lanes=None, functions=(), duration=600, animate=True, force=False):
         pointers = pointers or {}
-        data = (variables, list(bindings), event, pointers, index_lanes or {})
+        data = (variables, list(bindings), event, pointers, index_lanes or {}, tuple(functions))
         if self._rendering:
             return
         if self._has_render and not force and data == self._data:
             return
         self._has_render = True
+        context = event.function if event else ''
+        self._restoring_offsets = None
+        if context != self._context:
+            self._view_offsets[self._context] = (self.scalar_scroll.value(), self.array_scroll.value())
+            self._restoring_offsets = self._view_offsets.get(context, (0, 0))
+            self._context = context
+        if event is None and not variables:
+            self._view_offsets.clear()
+            self._restoring_offsets = (0, 0)
+        self._function_context = bool(context)
         previous = {key: QPointF(item.pos()) for key, item in self.motion.pointers.items()}
         was_busy = self.motion.busy
         visible_before = {key for key in self.boxes if self._visible_box(key)}
@@ -150,10 +170,10 @@ class MemoryView(QGraphicsView):
         self._rendering = True
         try:
             self.motion.clear()
-            self.boxes, self.array_anchors = {}, {}
+            self.boxes, self.array_anchors, self.function_boxes = {}, {}, {}
             self._draw(variables, bindings, event)
             transfers = []
-            if event and animate and not same_event:
+            if event and animate and not same_event and not event.calls:
                 for source, target in dict.fromkeys(event.transfers):
                     if (source in visible_before and source in self.boxes and target in self.boxes
                             and self._visible_box(source) and self._visible_box(target)):
@@ -177,11 +197,35 @@ class MemoryView(QGraphicsView):
                 else:
                     continue
                 destinations[key] = (point, label, lane if valid else 0, valid)
-            self.motion.start(transfers, destinations, previous, duration, animate and not same_event)
+            summary = None
+            if event and event.calls and not event.expanded and animate and not same_event:
+                effects = []
+                for name, index in dict.fromkeys(event.writes):
+                    cell = variables.get(name)
+                    if not cell:
+                        continue
+                    indices = range(min(64, len(cell['value']))) if index is None and isinstance(cell['value'], list) else [index]
+                    for target_index in indices:
+                        key = name, target_index, cell['identity']
+                        item = self.boxes.get(key)
+                        if item is None:
+                            continue
+                        before = event.before.get(name, {})
+                        old = before.get('value') if before.get('identity') == cell['identity'] else None
+                        if target_index is not None:
+                            old = old[target_index] if isinstance(old, list) and target_index < len(old) else None
+                        label = name if target_index is None else f'{name}[{target_index}]'
+                        old_text = label if old is None else f'{label} = {display(old)}'
+                        old_text = QFontMetricsF(item.value_label.font()).elidedText(old_text, Qt.TextElideMode.ElideRight, item.rect().width()-14)
+                        effects.append((item, item.value_label, old_text, item.value_label.toPlainText()))
+                summary = {'calls': event.calls, 'rect': self._sections['array'][0].rect(), 'effects': effects}
+            self.motion.start(transfers, destinations, previous, duration, animate and not same_event,
+                              call_summary=summary)
             for item in self.motion.pointers.values():
                 item.setParentItem(self._sections['array'][0])
         finally:
             self._rendering = False
+            self._restoring_offsets = None
         if was_busy and not self.motion.busy:
             self.motion.settled.emit()
 
@@ -195,7 +239,7 @@ class MemoryView(QGraphicsView):
         columns = max(2, int((width-24)//150))
         box_width = (width-28)/columns-12
         y = 12
-        if not variables:
+        if not variables and not self._data[5]:
             for bar in (self.scalar_scroll, self.array_scroll):
                 bar.setValue(0)
                 bar.hide()
@@ -227,17 +271,22 @@ class MemoryView(QGraphicsView):
                 info.setToolTip(info.toPlainText())
                 info.setPlainText(QFontMetricsF(info.font()).elidedText(info.toPlainText(), Qt.TextElideMode.ElideRight, width-32))
         scalar_bottom = min(220, max(144, int(height*.33)))
-        self.label('变量', 16, 58, 12, '#0f172a', True)
+        self.label(f'函数 {self._context} / 局部变量' if self._context else '变量与函数', 16, 58, 12, '#0f172a', True)
         self._begin_section('scalar', 88, scalar_bottom, width)
         y = 100
         scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list)]
-        if scalars:
-            for pos, (name, cell) in enumerate(scalars):
+        functions = () if self._function_context else self._data[5]
+        entries = [('function', name, None) for name in functions] + [('variable', name, cell) for name, cell in scalars]
+        if entries:
+            for pos, (kind, name, cell) in enumerate(entries):
                 x = 18+(pos % columns)*(box_width+12)
                 row_y = y+(pos//columns)*63
+                if kind == 'function':
+                    self.function_boxes[name] = self.box(name+'()', None, x, row_y, box_width, purple=True)
+                    continue
                 read, written = self.activity(name, None, cell, event)
                 self.boxes[name, None, cell['identity']] = self.box(name, cell['value'], x, row_y, box_width, read, written)
-            y += ((len(scalars)+columns-1)//columns)*63+16
+            y += ((len(entries)+columns-1)//columns)*63+16
         else:
             self.label('尚无标量变量', 18, y, 10, '#64748b')
         self._end_section('scalar', y)

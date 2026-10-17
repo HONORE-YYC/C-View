@@ -15,6 +15,15 @@ class Location:
     kind: str = 'statement'
 
 
+@dataclass(frozen=True)
+class Function:
+    name: str
+    node: ast.FuncDef
+    params: list[ast.Decl]
+    return_type: str
+
+
+_BUILTINS = {'printf', 'abs', 'rand', 'srand'}
 _TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
 _GENERATOR = c_generator.CGenerator()
 
@@ -39,30 +48,122 @@ class Program:
             raise CError(f'C 语法错误：{detail}', line, column) from None
         self.globals = []
         self.main = None
+        self.functions = {}
+        declarations = {}
+        definitions = {}
         for node in self.tree.ext:
-            if isinstance(node, ast.FuncDef):
-                if self.main is not None or node.decl.name != 'main':
-                    self.fail(node, '第一版仅支持一个 main 函数；自定义函数暂不支持')
-                signature = node.decl.type
-                if (not isinstance(signature.type, ast.TypeDecl)
-                        or not isinstance(signature.type.type, ast.IdentifierType)
-                        or signature.type.type.names != ['int']):
-                    self.fail(node, 'main 必须返回 int')
-                params = signature.args.params if signature.args else []
-                if params and not (len(params) == 1 and isinstance(params[0], ast.Typename)
-                                   and isinstance(params[0].type, ast.TypeDecl)
-                                   and isinstance(params[0].type.type, ast.IdentifierType)
-                                   and params[0].type.type.names == ['void']):
-                    self.fail(node, 'main 暂不支持参数，请使用 int main(void)')
-                self.main = node.body
-                self._check(node.body)
+            definition = isinstance(node, ast.FuncDef)
+            decl = node.decl if definition else node
+            if isinstance(decl, ast.Decl) and isinstance(decl.type, ast.FuncDecl):
+                name = decl.name
+                if name in _BUILTINS:
+                    self.fail(decl, f'{name} 是内置函数保留名称')
+                if definition and name in definitions:
+                    self.fail(decl, f'函数 {name} 重复定义')
+                if definition and node.param_decls:
+                    self.fail(decl, '函数参数请使用现代 C 声明语法')
+                params, return_type, signature = self._signature(decl, definition)
+                if name in declarations and declarations[name][0] != signature:
+                    self.fail(decl, f'函数 {name} 的声明与定义不兼容')
+                declarations[name] = (signature, decl)
+                if definition:
+                    definitions[name] = Function(name, node, params, return_type)
+                    if name == 'main':
+                        self.main = node.body
+                    else:
+                        self.functions[name] = definitions[name]
             elif isinstance(node, ast.Decl):
-                self._check(node)
                 self.globals.append(node)
             else:
                 self.fail(node, '暂不支持此顶层声明')
         if self.main is None:
             raise CError('缺少 int main(void) 函数')
+        for name, (_, decl) in declarations.items():
+            if name not in definitions:
+                self.fail(decl, f'函数 {name} 已声明但没有定义')
+        for node in self.globals:
+            if node.name in definitions:
+                self.fail(node, f'{node.name} 与函数名称重复')
+            self._check(node, global_scope=True)
+        self._calls = {name: set() for name in definitions}
+        for function in definitions.values():
+            for param in function.params:
+                if param.name in definitions or param.name in _BUILTINS:
+                    self.fail(param, f'参数名称 {param.name} 与函数名称重复')
+            self._check(function.node.body, function=function)
+        self._check_recursion(definitions)
+
+    def _signature(self, decl, definition):
+        if decl.quals or decl.storage or decl.funcspec:
+            self.fail(decl, '函数暂不支持类型修饰符或存储修饰符')
+        return_type = self._scalar_type(decl.type.type, allow_void=True)
+        params = decl.type.args.params if decl.type.args else []
+        if (len(params) == 1 and isinstance(params[0], ast.Typename)
+                and isinstance(params[0].type, ast.TypeDecl)
+                and isinstance(params[0].type.type, ast.IdentifierType)
+                and params[0].type.type.names == ['void']):
+            params = []
+        if decl.name == 'main':
+            if return_type != 'int':
+                self.fail(decl, 'main 必须返回 int')
+            if params:
+                self.fail(decl, 'main 暂不支持参数，请使用 int main(void)')
+        types = []
+        names = set()
+        for param in params:
+            if not isinstance(param, (ast.Decl, ast.Typename)):
+                self.fail(param, '函数参数仅支持命名的数值或一维数组参数')
+            if definition and (not isinstance(param, ast.Decl) or not param.name):
+                self.fail(param, '函数定义中的参数必须有名称')
+            if param.name and param.name in names:
+                self.fail(param, f'参数 {param.name} 重复声明')
+            names.add(param.name)
+            if param.quals or (isinstance(param, ast.Decl)
+                               and (param.storage or param.funcspec or param.init or param.bitsize)):
+                self.fail(param, '函数参数暂不支持修饰符或初始化')
+            type_node = param.type
+            array = isinstance(type_node, ast.ArrayDecl)
+            if array:
+                if not isinstance(type_node.type, ast.TypeDecl) or type_node.dim_quals:
+                    self.fail(param, '函数参数仅支持一维数组')
+                if type_node.dim is not None:
+                    if not self._constant_integer(type_node.dim):
+                        self.fail(param, '数组参数容量必须为整数常量表达式')
+                    self._check(type_node.dim)
+                type_node = type_node.type
+            if not isinstance(type_node, ast.TypeDecl):
+                self.fail(param, '函数参数仅支持数值或一维数组，不支持指针')
+            types.append((self._scalar_type(type_node), array))
+        return params, return_type, (return_type, tuple(types))
+
+    def _scalar_type(self, node, allow_void=False):
+        supported = ('int', 'float', 'double', 'void') if allow_void else ('int', 'float', 'double')
+        if (not isinstance(node, ast.TypeDecl) or node.quals
+                or not isinstance(node.type, ast.IdentifierType)
+                or len(node.type.names) != 1 or node.type.names[0] not in supported):
+            self.fail(node, '函数类型仅支持 int、float、double；void 仅可用于返回类型或空参数列表')
+        return node.type.names[0]
+
+    def _check_recursion(self, definitions):
+        # Iterative DFS also handles long acyclic chains without Python recursion.
+        complete = set()
+        for root in definitions:
+            if root in complete:
+                continue
+            active = {root}
+            stack = [(root, iter(self._calls[root]))]
+            while stack:
+                name, children = stack[-1]
+                child = next(children, None)
+                if child is None:
+                    complete.add(name)
+                    active.remove(name)
+                    stack.pop()
+                elif child in active:
+                    self.fail(definitions[name].node, f'暂不支持递归调用（包括相互递归）：{name} → {child}')
+                elif child not in complete:
+                    active.add(child)
+                    stack.append((child, iter(self._calls[child])))
 
     def location(self, node, kind='statement'):
         coord = node.coord
@@ -75,7 +176,7 @@ class Program:
         line, column = self.preprocessed.original(max(1, coord.line-self.offset), coord.column) if coord else (1, 1)
         raise CError(message, line, column)
 
-    def _check(self, node, loops=0, depth=0):
+    def _check(self, node, loops=0, depth=0, function=None, global_scope=False):
         if node is None:
             return
         if depth > 100:
@@ -91,6 +192,10 @@ class Program:
             self.fail(node, '仅支持 int、float、double 类型')
         if isinstance(node, ast.Decl) and (node.quals or node.storage or node.funcspec or node.bitsize):
             self.fail(node, '暂不支持类型修饰符、存储修饰符或位域')
+        if isinstance(node, ast.Decl) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
+            self.fail(node, f'变量名称 {node.name} 与函数名称重复')
+        if isinstance(node, ast.ID) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
+            self.fail(node, f'函数 {node.name} 只能用于函数调用，不能作为变量使用')
         if isinstance(node, ast.ArrayDecl):
             if not isinstance(node.type, ast.TypeDecl) or node.dim is None or node.dim_quals:
                 self.fail(node, '仅支持有明确容量的一维数组')
@@ -110,11 +215,33 @@ class Program:
             self.fail(node, f'暂不支持运算符 {node.op}')
         if isinstance(node, (ast.Break, ast.Continue)) and not loops:
             self.fail(node, 'break/continue 只能出现在循环内')
-        if isinstance(node, ast.FuncCall) and not (isinstance(node.name, ast.ID) and node.name.name in ('printf', 'abs', 'rand', 'srand')):
-            self.fail(node, '当前仅支持 printf、abs、rand、srand 调用')
+        if isinstance(node, ast.Return) and function:
+            if function.return_type == 'void' and node.expr is not None:
+                self.fail(node, 'void 函数的 return 不能带返回值')
+            if function.return_type != 'void' and node.expr is None:
+                self.fail(node, '非 void 函数的 return 必须带返回值')
+        if isinstance(node, ast.FuncCall):
+            if global_scope:
+                self.fail(node, '全局变量初始化必须使用常量，不能调用函数')
+            if not isinstance(node.name, ast.ID):
+                self.fail(node, '仅支持通过函数名称直接调用')
+            name = node.name.name
+            if name == 'main':
+                self.fail(node, 'main 是程序入口，不能作为函数调用')
+            if name not in self.functions and name not in _BUILTINS:
+                self.fail(node, f'函数 {name} 未定义或暂不支持')
+            if name in self.functions:
+                args = node.args.exprs if node.args else []
+                expected = len(self.functions[name].params)
+                if len(args) != expected:
+                    self.fail(node, f'函数 {name} 需要 {expected} 个参数，实际提供 {len(args)} 个')
+                if function:
+                    self._calls[function.name].add(name)
+            self._check(node.args, loops, depth + 1, function, global_scope)
+            return
         child_loops = loops + isinstance(node, (ast.For, ast.While))
         for _, child in node.children():
-            self._check(child, child_loops, depth + 1)
+            self._check(child, child_loops, depth + 1, function, global_scope)
 
     @staticmethod
     def _constant_integer(node, depth=0):
@@ -130,6 +257,7 @@ class Program:
 
     def targets(self):
         result = []
+        self.target_functions = {}
 
         def walk(node):
             if node is None:
@@ -154,5 +282,24 @@ class Program:
 
         for node in self.globals:
             walk(node)
+        for function in self.functions.values():
+            first = len(result)
+            result.append(self.location(function.node.decl, 'function'))
+            walk(function.node.body)
+            self.target_functions.update((loc, function.name) for loc in result[first:])
         walk(self.main)
+        for loc in result:
+            self.target_functions.setdefault(loc, '')
         return result
+
+    def call_reaches(self, names, target):
+        """Whether a pending call can enter the function owning a seek target."""
+        pending, seen = list(names), set()
+        while pending:
+            name = pending.pop()
+            if name == target:
+                return True
+            if name not in seen:
+                seen.add(name)
+                pending.extend(self._calls.get(name, ()))
+        return False

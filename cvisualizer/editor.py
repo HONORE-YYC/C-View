@@ -1,8 +1,8 @@
 """C editor with a line-number gutter and execution highlighting."""
 import re
 
-from PySide6.QtCore import Qt, QRect, QSize, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QSyntaxHighlighter, QTextCharFormat, QTextCursor
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPolygon, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QWidget, QTextEdit
 from .editing import context, escaped
 
@@ -36,6 +36,44 @@ class Gutter(QWidget):
     def __init__(self, editor):
         super().__init__(editor)
         self.editor = editor
+        self._hover_position = None
+        self.hover_line = 0
+        self.setMouseTracking(True)
+
+    def refresh_hover(self):
+        line = 0
+        if self._hover_position is not None and self.rect().contains(self._hover_position) and self.editor._play_enabled:
+            for block, top, height in self.editor.visible_gutter_blocks():
+                if top <= self._hover_position.y() < top + height:
+                    candidate = block.blockNumber() + 1
+                    if candidate in self.editor._playable_lines:
+                        line = candidate
+                    break
+        if line != self.hover_line:
+            self.hover_line = line
+            self.setCursor(Qt.CursorShape.PointingHandCursor if line else Qt.CursorShape.ArrowCursor)
+            self.setToolTip('播放当前语句' if line else '')
+            self.update()
+
+    def mouseMoveEvent(self, event):
+        self._hover_position = event.position().toPoint()
+        self.refresh_hover()
+        event.accept()
+
+    def leaveEvent(self, event):
+        self._hover_position = None
+        self.refresh_hover()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        self._hover_position = event.position().toPoint()
+        self.refresh_hover()
+        if event.button() == Qt.MouseButton.LeftButton and self.hover_line:
+            self.editor.playLineRequested.emit(self.hover_line)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        event.accept()
 
     def sizeHint(self):
         return QSize(self.editor.gutter_width(), 0)
@@ -46,10 +84,13 @@ class Gutter(QWidget):
 
 class CodeEditor(QPlainTextEdit):
     markChanged = Signal(bool)
+    playLineRequested = Signal(int)
 
     def __init__(self):
         super().__init__()
         self._execution_cursor = None
+        self._playable_lines = set()
+        self._play_enabled = True
         self.setFont(QFont('Consolas', 11))
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance(' ') * 4)
@@ -197,36 +238,63 @@ class CodeEditor(QPlainTextEdit):
     def gutter_width(self):
         return 18 + self.fontMetrics().horizontalAdvance('9') * max(2, len(str(self.blockCount())))
 
+    def set_playable_lines(self, lines):
+        self._playable_lines = set(lines)
+        self.gutter.refresh_hover()
+
+    def set_play_enabled(self, enabled):
+        self._play_enabled = bool(enabled)
+        self.gutter.refresh_hover()
+
+    def visible_gutter_blocks(self):
+        block = self.firstVisibleBlock()
+        while block.isValid():
+            top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+            if top > self.viewport().height():
+                break
+            height = round(self.blockBoundingRect(block).height())
+            if block.isVisible() and top + height > 0:
+                yield block, top, height
+            block = block.next()
+
     def update_gutter_width(self, *_):
         self.setViewportMargins(self.gutter_width(), 0, 0, 0)
 
     def update_gutter(self, rect, dy):
         if dy:
             self.gutter.scroll(0, dy)
+            # Scrolling moves the old triangle too; repaint it at the mouse's new line.
+            self.gutter.update()
         else:
             self.gutter.update(0, rect.y(), self.gutter.width(), rect.height())
         if rect.contains(self.viewport().rect()):
             self.update_gutter_width()
+        self.gutter.refresh_hover()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         rect = self.contentsRect()
         self.gutter.setGeometry(QRect(rect.left(), rect.top(), self.gutter_width(), rect.height()))
+        self.gutter.refresh_hover()
 
     def paint_gutter(self, event):
         painter = QPainter(self.gutter)
         painter.fillRect(event.rect(), QColor('#f3f6fa'))
-        block = self.firstVisibleBlock()
-        number = block.blockNumber()
-        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
-        while block.isValid() and top <= event.rect().bottom():
-            height = round(self.blockBoundingRect(block).height())
-            if block.isVisible() and top + height >= event.rect().top():
+        for block, top, height in self.visible_gutter_blocks():
+            if top > event.rect().bottom():
+                break
+            if top + height >= event.rect().top():
+                number = block.blockNumber() + 1
+                if number == self.gutter.hover_line:
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor('#2563eb'))
+                    x = self.gutter.width() - 20
+                    y = top + self.fontMetrics().height() // 2
+                    painter.drawPolygon(QPolygon([QPoint(x, y - 5), QPoint(x, y + 5), QPoint(x + 8, y)]))
+                    continue
                 painter.setPen(QColor('#8794a7'))
-                painter.drawText(0, top, self.gutter.width()-9, height, Qt.AlignmentFlag.AlignRight, str(number+1))
-            top += height
-            block = block.next()
-            number += 1
+                painter.drawText(0, top, self.gutter.width()-9, height, Qt.AlignmentFlag.AlignRight, str(number))
 
     def mark(self, line=0, column=1, color='#fef3c7'):
         block = self.document().findBlockByNumber(line-1)
