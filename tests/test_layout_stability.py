@@ -4,6 +4,66 @@ from cvisualizer.editor import CodeEditor
 from cvisualizer.engine import Engine
 from cvisualizer.views import MemoryView
 from cvisualizer.window import MainWindow
+from PySide6.QtWidgets import QTableWidget
+import pytest
+
+
+def test_middle_panel_uses_canvas_without_runtime_table(app):
+    window = MainWindow()
+    window.show()
+    app.processEvents()
+    assert not window.findChildren(QTableWidget)
+    assert window.visuals.height() > window.editor.height() * .9
+    window.close()
+
+
+@pytest.mark.parametrize('width', [350, 650])
+def test_variables_and_functions_form_compact_right_column(app, width):
+    view = MemoryView()
+    view.resize(width, 600)
+    view.show()
+    app.processEvents()
+    engine = Engine('int f(int x){return x;} int main(){int a[4]={0};int x=1;int y;}')
+    while engine.peek():
+        event = engine.step()
+    view.render(engine.runtime.snapshot(), [], event, functions=('f',), animate=False)
+    scalar = view._sections['scalar'][0].rect()
+    array = view._sections['array'][0].rect()
+    assert scalar.left() > array.right()
+    assert scalar.top() == array.top()
+    assert scalar.bottom() == array.bottom()
+    cards = list(view.function_boxes.values()) + [item for (_, index, _), item in view.boxes.items() if index is None]
+    assert len({item.mapRectToScene(item.rect()).left() for item in cards}) == 1
+    assert all(scalar.contains(item.sceneBoundingRect()) for item in cards)
+    assert max(item.rect().height() for item in cards) <= 38
+    view.close()
+
+
+def test_return_from_function_restores_both_side_by_side_scroll_positions(app):
+    view = MemoryView()
+    view.resize(600, 600)
+    view.show()
+    app.processEvents()
+    engine = Engine('int f(int x){return x+1;} int main(){int a[40]={0};' +
+                    ''.join(f'int v{i}={i};' for i in range(24)) + 'v23=f(v23);}')
+    for _ in range(25):
+        event = engine.step()
+    view.render(engine.runtime.snapshot(), [], event, functions=('f',), animate=False)
+    view.scalar_scroll.setValue(250)
+    view.array_scroll.setValue(200)
+    assert view.scalar_scroll.value() == 250
+    assert view.array_scroll.value() == 200
+    event = engine.step(expand_calls=True)
+    view.render(engine.display_snapshot(), [], event, functions=('f',), animate=False)
+    assert view.scalar_scroll.value() == 0
+    assert view.array_scroll.value() == 0
+    while engine.has_detail:
+        event = engine.step(expand_calls=True)
+        view.render(engine.display_snapshot(), [], event, functions=('f',), animate=False)
+    assert view.scalar_scroll.value() == 250
+    assert view.array_scroll.value() == 200
+    assert engine.runtime.snapshot()['v23']['value'] == 24
+    view.close()
 
 
 def test_array_position_stays_fixed_as_scalars_enter_and_leave_scope(app):
@@ -100,7 +160,10 @@ def test_scrolled_scalar_transfer_uses_visible_positions(app):
     view.render(engine.runtime.snapshot(), [], event)
     assert len(view.motion.arrows) == 1
     source = next(item for (name, _, _), item in view.boxes.items() if name == 'v19')
-    assert abs(view.motion.arrows[0].route.pointAtPercent(0).y() - source.mapRectToScene(source.rect()).bottom() - 2) < 1
+    rect = source.mapRectToScene(source.rect())
+    origin = view.motion.arrows[0].route.pointAtPercent(0)
+    assert abs(origin.x() - (rect.left()-2)) < 1
+    assert abs(origin.y() - rect.center().y()) < 1
     view.close()
 
 

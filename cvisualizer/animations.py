@@ -24,11 +24,17 @@ class TransferArrow(QGraphicsPathItem):
             start, end = source.topLeft() + QPointF(source.width()/2, -2), target.topLeft() + QPointF(target.width()/2, -2)
             lift = min(75, max(36, abs(end.x()-start.x())*.18))
             c1, c2 = start + QPointF(0, -lift), end + QPointF(0, -lift)
+        elif source.right() < target.left() or target.right() < source.left():
+            direction = 1 if target.center().x() > source.center().x() else -1
+            start = QPointF(source.right()+2 if direction > 0 else source.left()-2, source.center().y())
+            end = QPointF(target.left()-2 if direction > 0 else target.right()+2, target.center().y())
+            bend = abs(end.x()-start.x())*.45
+            c1, c2 = start + QPointF(direction*bend, 0), end - QPointF(direction*bend, 0)
         else:
             direction = 1 if target.center().y() > source.center().y() else -1
             start = QPointF(source.center().x(), source.bottom()+2 if direction > 0 else source.top()-2)
             end = QPointF(target.center().x(), target.top()-2 if direction > 0 else target.bottom()+2)
-            bend = max(36, abs(end.y()-start.y())*.45)
+            bend = abs(end.y()-start.y())*.45
             c1, c2 = start + QPointF(0, direction*bend), end - QPointF(0, direction*bend)
         self.route = QPainterPath(start)
         self.route.cubicTo(c1, c2, end)

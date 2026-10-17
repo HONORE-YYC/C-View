@@ -64,8 +64,8 @@ class MemoryView(QGraphicsView):
                 self.motion.origins[key] += shift
         self.motion.finish()
 
-    def _begin_section(self, name, top, bottom, width):
-        clip = QGraphicsRectItem(0, top, width, max(1, bottom-top))
+    def _begin_section(self, name, top, bottom, width, left=0):
+        clip = QGraphicsRectItem(left, top, width, max(1, bottom-top))
         clip.setPen(QPen(Qt.PenStyle.NoPen))
         clip.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape)
         self.scene().addItem(clip)
@@ -117,7 +117,7 @@ class MemoryView(QGraphicsView):
         item.setPos(x, y)
         return item
 
-    def box(self, name, value, x, y, width, read=False, written=False, purple=False):
+    def box(self, name, value, x, y, width, read=False, written=False, purple=False, compact=False):
         fill = '#e5e7eb' if value is None else '#dcfce7'
         border = '#a1a8b3' if value is None else '#86bda4'
         if purple or self._function_context:
@@ -126,12 +126,12 @@ class MemoryView(QGraphicsView):
             border = '#60a5fa'
         if written:
             border = '#f59e0b'
-        rect = self.scene().addRect(x, y, width, 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(QColor(fill)))
+        rect = self.scene().addRect(x, y, width, 36 if compact else 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(QColor(fill)))
         rect.setParentItem(self._content_parent)
         rect.setData(0, name)
         text = name if value is None else f'{name} = {display(value)}'
         rect.setToolTip(text + ('（未初始化）' if value is None else ''))
-        item = self.label(text, x+6, y+8, 10, '#172b4d', True)
+        item = self.label(text, x+6, y+5 if compact else y+8, 9 if compact else 10, '#172b4d', True)
         item.setToolTip(rect.toolTip())
         item.setPlainText(QFontMetricsF(item.font()).elidedText(text, Qt.TextElideMode.ElideRight, width-14))
         rect.value_label = item
@@ -233,24 +233,19 @@ class MemoryView(QGraphicsView):
         self.scene().clear()
         self._sections = {}
         self._content_parent = None
-        width = max(300, self.viewport().width()-28)
-        height = max(1, self.viewport().height())
+        full_width = max(320, self.viewport().width()-20)
+        height = max(1, self.viewport().height()-8)
+        rail_width = min(184, max(120, int(full_width*.3)))
+        width = full_width-rail_width-28
+        rail_left = width+28
         self.scene().setSceneRect(0, 0, self.viewport().width(), self.viewport().height())
-        columns = max(2, int((width-24)//150))
+        columns = max(1, int((width-28)//150))
         box_width = (width-28)/columns-12
         y = 12
-        if not variables and not self._data[5]:
-            for bar in (self.scalar_scroll, self.array_scroll):
-                bar.setValue(0)
-                bar.hide()
-            self.label('每一步，都看得见', 18, y+12, 18, '#0f766e', True)
-            item = self.label('定义变量或数组后，这里会生成方框。\n灰色：未赋值，仅显示名字\n绿色：已有值，显示「名字 = 值」\n蓝色边框：读取  ·  橙色边框：写入', 18, y+58, 10)
-            item.setTextWidth(width-36)
-            return
         if event:
             title = self.label(f'本步：{event.text}', 16, y, 10, '#0f766e', True)
             title.setToolTip(title.toPlainText())
-            title.setPlainText(QFontMetricsF(title.font()).elidedText(title.toPlainText().replace('\n', ' '), Qt.TextElideMode.ElideRight, width-32))
+            title.setPlainText(QFontMetricsF(title.font()).elidedText(title.toPlainText().replace('\n', ' '), Qt.TextElideMode.ElideRight, full_width-32))
             y = 32
             changes = []
             for name, index in dict.fromkeys(event.writes):
@@ -269,33 +264,36 @@ class MemoryView(QGraphicsView):
             if changes:
                 info = self.label('  ·  '.join(changes[:8]), 16, y, 9, '#64748b')
                 info.setToolTip(info.toPlainText())
-                info.setPlainText(QFontMetricsF(info.font()).elidedText(info.toPlainText(), Qt.TextElideMode.ElideRight, width-32))
-        scalar_bottom = min(220, max(144, int(height*.33)))
-        self.label(f'函数 {self._context} / 局部变量' if self._context else '变量与函数', 16, 58, 12, '#0f172a', True)
-        self._begin_section('scalar', 88, scalar_bottom, width)
+                info.setPlainText(QFontMetricsF(info.font()).elidedText(info.toPlainText(), Qt.TextElideMode.ElideRight, full_width-32))
+        self.label('数组与数据结构', 16, 58, 10, '#0f172a', True)
+        heading = self.label(f'{self._context} / 局部变量' if self._context else '变量与函数', rail_left+6, 58, 10, '#0f172a', True)
+        heading.setToolTip(heading.toPlainText())
+        heading.setPlainText(QFontMetricsF(heading.font()).elidedText(heading.toPlainText(), Qt.TextElideMode.ElideRight, rail_width-12))
+        self._begin_section('scalar', 88, height, rail_width, rail_left)
         y = 100
         scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list)]
         functions = () if self._function_context else self._data[5]
         entries = [('function', name, None) for name in functions] + [('variable', name, cell) for name, cell in scalars]
         if entries:
             for pos, (kind, name, cell) in enumerate(entries):
-                x = 18+(pos % columns)*(box_width+12)
-                row_y = y+(pos//columns)*63
+                x = rail_left+8
+                row_y = y+pos*54
                 if kind == 'function':
-                    self.function_boxes[name] = self.box(name+'()', None, x, row_y, box_width, purple=True)
+                    self.function_boxes[name] = self.box(name+'()', None, x, row_y, rail_width-16, purple=True, compact=True)
                     continue
                 read, written = self.activity(name, None, cell, event)
-                self.boxes[name, None, cell['identity']] = self.box(name, cell['value'], x, row_y, box_width, read, written)
-            y += ((len(entries)+columns-1)//columns)*63+16
+                self.boxes[name, None, cell['identity']] = self.box(name, cell['value'], x, row_y, rail_width-16, read, written, compact=True)
+            y += len(entries)*54
         else:
-            self.label('尚无标量变量', 18, y, 10, '#64748b')
+            self.label('尚无标量变量', rail_left+6, y, 9, '#64748b')
         self._end_section('scalar', y)
-        self.scene().addLine(16, scalar_bottom+6, width-4, scalar_bottom+6, QPen(QColor('#e2e8f0')))
-        self._begin_section('array', scalar_bottom+12, height, width)
-        y = scalar_bottom+20
+        self.scene().addLine(rail_left-7, 58, rail_left-7, height, QPen(QColor('#e2e8f0')))
+        self._begin_section('array', 88, height, width)
+        y = 100
         bound = {b.array: b for b in bindings}
         if not any(isinstance(cell['value'], list) for cell in variables.values()):
-            self.label('声明数组后，在这里观察数组与数据结构。', 18, y, 10, '#64748b')
+            hint = self.label('声明数组后，在这里观察数组与数据结构。\n变量和函数显示在右侧。', 18, y, 10, '#64748b')
+            hint.setTextWidth(max(80, width-36))
         for name, cell in variables.items():
             if not isinstance(cell['value'], list):
                 continue
@@ -315,22 +313,23 @@ class MemoryView(QGraphicsView):
             active = set(model.active)
             visible = list(range(min(64, len(model.values))))
             vertical = model.kind == 'stack'
+            labels_below = not vertical or width < box_width+190
             if vertical:
                 visible.reverse()
             max_bottom = y
             for pos, index in enumerate(visible):
                 x = 24 if vertical else 18+(pos % columns)*(box_width+12)
-                cy = y+pos*(96+marker_space) if vertical else y+(pos//columns)*(112+marker_space)
+                cy = y+pos*((112 if labels_below else 96)+marker_space) if vertical else y+(pos//columns)*(112+marker_space)
                 read, written = self.activity(name, index, cell, event)
                 self.boxes[name, index, cell['identity']] = self.box(f'{name}[{index}]', model.values[index], x, cy, box_width, read, written)
                 if model.kind != 'array':
-                    self.label('有效' if index in active else '空闲位', x+6 if not vertical else x+box_width+14,
-                               cy+45 if not vertical else cy+11, 8, '#64748b')
+                    self.label('有效' if index in active else '空闲位', x+6 if labels_below else x+box_width+14,
+                               cy+45 if labels_below else cy+11, 8, '#64748b')
                 markers = model.markers.get(index, [])
                 if markers:
-                    self.label(' / '.join(markers), x+box_width+75 if vertical else x,
-                               cy+8 if vertical else cy+60, 9, '#0f766e', True)
-                max_bottom = max(max_bottom, cy+(58 if vertical else 82))
+                    self.label(' / '.join(markers), x if labels_below else x+box_width+75,
+                               cy+60 if labels_below else cy+8, 9, '#0f766e', True)
+                max_bottom = max(max_bottom, cy+(82 if labels_below else 58))
             y = max_bottom+10
             if len(model.values) > 64:
                 self.label(f'仅绘制前 64 / {len(model.values)} 个单元；执行器处理完整数组', 18, y, 9, '#64748b')

@@ -2,11 +2,11 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QAbstractAnimation
-from PySide6.QtGui import QColor, QFont, QAction, QKeySequence, QCursor
+from PySide6.QtGui import QAction, QKeySequence, QCursor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QSlider, QSplitter, QPlainTextEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFileDialog, QMessageBox, QDialog, QFrame, QAbstractItemView, QMenu,
+    QComboBox, QSlider, QSplitter, QPlainTextEdit,
+    QFileDialog, QMessageBox, QDialog, QFrame, QMenu,
 )
 
 from .bindings import BindingDialog, read_bindings, write_bindings
@@ -31,10 +31,8 @@ QPushButton:disabled { color: #a0aabd; background: #f2f5f8; border-color: #e0e6e
 QPushButton#primary { color: white; background: #0f766e; border-color: #0f766e; font-weight: 700; }
 QPushButton#primary:hover { background: #115e59; }
 QComboBox { background: white; border: 1px solid #cdd8e4; border-radius: 5px; padding: 7px; }
-QPlainTextEdit, QGraphicsView, QTableWidget { background: white; border: none; selection-background-color: #cceae7; }
+QPlainTextEdit, QGraphicsView { background: white; border: none; selection-background-color: #cceae7; }
 QPlainTextEdit { font-family: "Consolas", "Microsoft YaHei UI", monospace; font-size: 13px; }
-QHeaderView::section { background: #f1f5f9; color: #64748b; padding: 5px; border: none; }
-QTableWidget { gridline-color: #edf1f5; }
 QSplitter::handle { background: #e5ebf1; }
 QSlider::groove:horizontal { height: 5px; background: #dce5ed; border-radius: 2px; }
 QSlider::handle:horizontal { background: #0f766e; width: 13px; margin: -4px 0; border-radius: 6px; }
@@ -153,22 +151,15 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.filename_label)
         splitter.addWidget(left)
 
-        middle, middle_layout = panel('02 / 运行状态', '灰框：未赋值  绿框：已赋值  蓝边：读取  橙边：写入')
-        self.variables = QTableWidget(0, 3)
-        self.variables.setHorizontalHeaderLabels(['变量', '类型', '当前值'])
-        self.variables.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.variables.verticalHeader().hide()
-        self.variables.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.variables.setFixedHeight(112)
-        self.variables.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        middle_layout.addWidget(self.variables)
+        middle, middle_layout = panel('02 / 演示画布', '灰框：未赋值  绿框：已赋值  蓝边：读取  橙边：写入')
+        heading = middle_layout.takeAt(0).widget()
         binding_row = QHBoxLayout()
-        binding_row.addWidget(QLabel('变量、数组与数据结构'))
+        binding_row.addWidget(heading)
         binding_row.addStretch()
         self.binding_button = QPushButton('结构绑定')
         self.binding_button.clicked.connect(self.edit_bindings)
         binding_row.addWidget(self.binding_button)
-        middle_layout.addLayout(binding_row)
+        middle_layout.insertLayout(0, binding_row)
         self.visuals = MemoryView()
         middle_layout.addWidget(self.visuals, 1)
         splitter.addWidget(middle)
@@ -265,7 +256,6 @@ class MainWindow(QMainWindow):
         self.targets.clear()
         self.log.clear()
         self.output.clear()
-        self.variables.setRowCount(0)
         self.visuals.render({}, self.bindings, functions=self.function_names())
         self.step_label.setText('STEP 0000')
         self.explanation.setText('点击「完整演示」或「单步」开始。')
@@ -433,19 +423,6 @@ class MainWindow(QMainWindow):
         self.status.setText(f'{STATES[state]}  ·  {c.message}')
         event = c.engine.last
         snapshot = c.engine.display_snapshot()
-        rows = [(name, cell) for name, cell in snapshot.items() if not isinstance(cell['value'], list)]
-        self.variables.setRowCount(len(rows))
-        for row, (name, cell) in enumerate(rows):
-            same_cell = event and event.variables.get(name, {}).get('identity') == cell['identity']
-            for col, value in enumerate([name, cell['type'], display(cell['value'])]):
-                item = QTableWidgetItem(value)
-                if event and event.function:
-                    item.setBackground(QColor('#f3e8ff'))
-                elif same_cell and (name, None) in event.writes:
-                    item.setBackground(QColor('#fef3c7'))
-                elif same_cell and (name, None) in event.reads:
-                    item.setBackground(QColor('#dbeafe'))
-                self.variables.setItem(row, col, item)
         self.visuals.render(snapshot, self.bindings, event, pointers=c.engine.index_markers(),
                             index_lanes=c.engine.index_lanes,
                             functions=self.function_names(),
