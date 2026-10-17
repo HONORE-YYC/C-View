@@ -9,6 +9,7 @@ from pycparser import c_ast as ast
 
 from .runtime import Cell
 from .motion import declaration_key
+from .pointers import Pointer
 
 
 class FunctionExecution:
@@ -37,7 +38,10 @@ class FunctionExecution:
             return visible
         used = self._used[self.stack[-1].name]
         local = set().union(*(set(scope) for scope in rt.scopes[1:]))
-        return {name: cell for name, cell in visible.items() if name in local or name in used}
+        addresses = {cell['value'].identity for name, cell in visible.items()
+                     if (name in local or name in used) and isinstance(cell['value'], Pointer)}
+        return {name: cell for name, cell in visible.items()
+                if name in local or name in used or cell['identity'] in addresses}
 
     def call(self, node):
         from .engine import Event, _Flow
@@ -51,29 +55,25 @@ class FunctionExecution:
         inputs, params = [], {}
         for param, arg in zip(spec.params, args):
             array = isinstance(param.type, ast.ArrayDecl)
-            base = param.type.type if array else param.type
+            pointer = isinstance(param.type, ast.PtrDecl)
+            base = param.type.type if array or pointer else param.type
             type_name = base.type.names[0]
-            if array:
-                if not isinstance(arg, ast.ID):
-                    rt.fail(arg, '数组参数需要传入一维数组名')
-                source = rt.cell(arg.name, arg)
-                if not isinstance(source.value, list) or source.type != type_name:
-                    rt.fail(arg, '数组实参与形参的元素类型必须相同')
-                cell = Cell(type_name, source.value, source.identity, declaration_key(param))
-                value, sources = deepcopy(source.value), [(arg.name, None, source.identity)]
-            else:
-                value, sources = rt.evaluate_sources(arg)
-                value = rt.convert(value, type_name, arg)
-                cell = Cell(type_name, value, rt.next_identity, declaration_key(param))
-                rt.next_identity += 1
+            # An array parameter is adjusted to a pointer in C, including local p++.
+            type_name += '*' if pointer or array else ''
+            value, sources = rt.evaluate_sources(arg)
+            value = rt.convert(value, type_name, arg)
+            cell = Cell(type_name, value, rt.next_identity, declaration_key(param))
+            rt.next_identity += 1
             params[param.name] = cell
             inputs.append({'name': param.name, 'expression': engine.program.location(arg).text,
                            'value': deepcopy(value), 'sources': sources})
         caller = rt.scopes
         caller_visible = rt.snapshot()
-        saved_activity = rt.reads, rt.writes, rt.transfers, rt._source_frames
+        saved_activity = rt.reads, rt.writes, rt.transfers, rt._source_frames, rt.write_targets
         rt.reads, rt.writes, rt.transfers, rt._source_frames = [], [], [], []
+        rt.write_targets = []
         # Only globals and the callee's parameters are in lexical scope.
+        rt.callers.append(caller)
         rt.scopes = [caller[0], params]
         self.stack.append(spec)
         record = {'name': spec.name, 'inputs': inputs, 'return': None}
@@ -93,10 +93,9 @@ class FunctionExecution:
                         engine._consume(action.location)
                         before = self.visible() if engine._record_detail else {}
                         rt.reads, rt.writes, rt.transfers = [], [], []
+                        rt.write_targets = []
                         description = action.run()
-                        for name, index in rt.writes:
-                            cell = rt.cell(name, spec.node)
-                            changed.add((cell.identity, index))
+                        changed.update(rt.write_targets)
                         loc = action.location
                         if engine._record_detail:
                             engine.capture_detail(Event(loc.line, loc.column, loc.text, loc.kind, str(description),
@@ -113,7 +112,9 @@ class FunctionExecution:
         finally:
             self.stack.pop()
             rt.scopes = caller
-            rt.reads, rt.writes, rt.transfers, rt._source_frames = saved_activity
+            rt.callers.pop()
+            rt.reads, rt.writes, rt.transfers, rt._source_frames, rt.write_targets = saved_activity
+            rt.write_targets.extend(changed)
             for name, cell in caller_visible.items():
                 for identity, index in changed:
                     if cell['identity'] == identity:

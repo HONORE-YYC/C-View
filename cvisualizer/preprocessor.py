@@ -149,8 +149,9 @@ class Preprocessor:
 
     def directive(self, text, line):
         token = Token('', line, 1)
-        include = re.fullmatch(r'\s*#\s*include\s*(?:<(stdio\.h|stdlib\.h|cstdlib)>|"(stdio\.h|stdlib\.h|cstdlib)")\s*', text)
+        include = re.fullmatch(r'\s*#\s*include\s*(?:<(stdio\.h|stdlib\.h|cstdlib|stddef\.h)>|"(stdio\.h|stdlib\.h|cstdlib|stddef\.h)")\s*', text)
         if include:
+            self.macros.setdefault('NULL', Macro(None, tokenize('0')))
             if (include[1] or include[2]) in ('stdlib.h', 'cstdlib'):
                 self.macros.setdefault('RAND_MAX', Macro(None, tokenize('32767')))
             return

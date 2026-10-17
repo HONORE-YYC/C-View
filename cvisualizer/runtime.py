@@ -9,6 +9,7 @@ from pycparser import c_ast as ast
 
 from .language import CError
 from .motion import declaration_key
+from .pointers import Pointer
 
 
 @dataclass
@@ -29,6 +30,8 @@ class Runtime:
     def __init__(self, program):
         self.program = program
         self.scopes = [{}]
+        self.callers = []
+        self.write_targets = []
         self.output = ''
         self.reads, self.writes = [], []
         self.next_identity = 1
@@ -40,13 +43,66 @@ class Runtime:
     def fail(self, node, message):
         self.program.fail(node, message)
 
-    def snapshot(self):
+    def visible_cells(self):
+        """Name/identity lookup without copying array contents during dereference."""
         visible = {}
         for scope in self.scopes:
-            visible.update({name: {'type': cell.type, 'value': deepcopy(cell.value), 'identity': cell.identity,
-                                  'declaration': cell.declaration}
-                            for name, cell in scope.items()})
+            visible.update(scope)
+        identities = {cell.identity for cell in visible.values()}
+        for value in list(visible.values()):
+            pointer = value.value
+            if isinstance(pointer, Pointer) and pointer.identity not in identities:
+                target = self.find_identity(pointer.identity)
+                if target:
+                    name, cell = target
+                    alias = name if name not in visible else f'{name}@{cell.identity}'
+                    visible[alias] = cell
+                    identities.add(cell.identity)
         return visible
+
+    def snapshot(self):
+        return {name: {'type': cell.type, 'value': deepcopy(cell.value), 'identity': cell.identity,
+                       'declaration': cell.declaration} for name, cell in self.visible_cells().items()}
+
+    def find_identity(self, identity):
+        for scopes in [self.scopes] + list(reversed(self.callers)):
+            for scope in reversed(scopes):
+                for name, cell in scope.items():
+                    if cell.identity == identity:
+                        return name, cell
+        return None
+
+    def pointer_ref(self, pointer, node, address=False):
+        if not isinstance(pointer, Pointer):
+            self.fail(node, '解引用需要指针')
+        if pointer.identity is None:
+            self.fail(node, '不能解引用或移动空指针')
+        target = self.find_identity(pointer.identity)
+        if target is None:
+            self.fail(node, '悬空指针：目标对象已离开作用域')
+        name, cell = target
+        offset = pointer.index if pointer.index is not None else 0
+        size = len(cell.value) if isinstance(cell.value, list) else 1
+        if not 0 <= offset <= size or (not address and offset == size):
+            self.fail(node, '指针越界：不能访问对象范围外或尾后位置')
+        for alias, value in self.visible_cells().items():
+            if value.identity == cell.identity:
+                name = alias
+                break
+        index = offset if isinstance(cell.value, list) else None
+        return name, cell, index
+
+    def pointer_offset(self, pointer, amount, node):
+        self.pointer_ref(pointer, node, address=True)
+        if not isinstance(amount, int):
+            self.fail(node, '指针偏移必须是整数')
+        target = self.find_identity(pointer.identity)[1]
+        index = (pointer.index or 0) + amount
+        size = len(target.value) if isinstance(target.value, list) else 1
+        if not 0 <= index <= size:
+            self.fail(node, '指针偏移越界')
+        return Pointer(pointer.identity, index if isinstance(target.value, list) or index else None,
+                       pointer.base_type, pointer.name)
 
     def cell(self, name, node):
         for scope in reversed(self.scopes):
@@ -55,6 +111,12 @@ class Runtime:
         self.fail(node, f'变量 {name} 未声明')
 
     def convert(self, value, type_name, node):
+        if type_name.endswith('*'):
+            if isinstance(value, int) and value == 0:
+                return Pointer(None, None, type_name[:-1], '')
+            if not isinstance(value, Pointer) or value.base_type != type_name[:-1]:
+                self.fail(node, '指针类型不匹配；只可赋同类型地址或空指针 0')
+            return value
         if not isinstance(value, (int, float)):
             self.fail(node, '需要数值，不能使用整个数组或字符串参与运算')
         if isinstance(value, float) and not math.isfinite(value):
@@ -67,6 +129,8 @@ class Runtime:
         return float(value)
 
     def truth(self, value, node):
+        if isinstance(value, Pointer):
+            return value.identity is not None
         if not isinstance(value, (int, float)):
             self.fail(node, '条件或逻辑运算需要数值；srand 没有返回值')
         return bool(value)
@@ -78,10 +142,11 @@ class Runtime:
         if sum(len(s) for s in self.scopes) >= 512:
             self.fail(node, '同时存活变量超过 512 个')
         array = isinstance(node.type, ast.ArrayDecl)
-        base = node.type.type if array else node.type
+        pointer = isinstance(node.type, ast.PtrDecl)
+        base = node.type.type if array or pointer else node.type
         if not isinstance(base, ast.TypeDecl):
             self.fail(node, '不支持此声明')
-        type_name = base.type.names[0]
+        type_name = base.type.names[0] + ('*' if pointer else '')
         if array:
             size = self.evaluate(node.type.dim)
             if not 1 <= size <= 4096:
@@ -91,7 +156,7 @@ class Runtime:
                 self.fail(node, '数组总元素超过 16384 个')
             initial = [None] * size
         else:
-            initial = 0 if global_scope else None
+            initial = self.convert(0, type_name, node) if global_scope else None
         scope[node.name] = Cell(type_name, initial, self.next_identity, declaration_key(node))
         self.next_identity += 1
         if array:
@@ -111,24 +176,22 @@ class Runtime:
         self.writes.append((node.name, None))
         return f'定义 {node.name} = {scope[node.name].value}'
 
-    def reference(self, node):
+    def reference(self, node, address=False):
+        if isinstance(node, ast.UnaryOp) and node.op == '*':
+            pointer, _ = self.evaluate_sources(node.expr)
+            return self.pointer_ref(pointer, node, address)
         if isinstance(node, ast.ID):
             cell = self.cell(node.name, node)
             if isinstance(cell.value, list):
                 self.fail(node, '数组需要下标，不能整体赋值或参与运算')
             return node.name, cell, None
-        if isinstance(node, ast.ArrayRef) and isinstance(node.name, ast.ID):
-            name = node.name.name
-            cell = self.cell(name, node)
-            if not isinstance(cell.value, list):
-                self.fail(node, f'{name} 不是数组')
+        if isinstance(node, ast.ArrayRef):
+            pointer, _ = self.evaluate_sources(node.name)
             # Index reads choose an address; they are not copied into the target.
             index, _ = self.evaluate_sources(node.subscript)
             if not isinstance(index, int):
                 self.fail(node, '数组下标必须是整数')
-            if not 0 <= index < len(cell.value):
-                self.fail(node, f'数组 {name}[{index}] 越界，有效下标 0–{len(cell.value)-1}')
-            return name, cell, index
+            return self.pointer_ref(self.pointer_offset(pointer, index, node), node, address)
         self.fail(node, '赋值或自增的目标必须是变量或数组元素')
 
     def read(self, ref, node):
@@ -160,11 +223,37 @@ class Runtime:
         else:
             cell.value[index] = converted
         self.writes.append((name, index))
+        self.write_targets.append((cell.identity, index))
         target = name, index, cell.identity
         self.transfers.extend((source, target) for source in sources if source != target)
         return converted
 
     def binary(self, op, left, right, node):
+        if isinstance(left, Pointer) or isinstance(right, Pointer):
+            if op == '+' and isinstance(left, int) and isinstance(right, Pointer):
+                return self.pointer_offset(right, left, node)
+            if isinstance(left, Pointer) and isinstance(right, int) and op in ('+', '-'):
+                return self.pointer_offset(left, right if op == '+' else -right, node)
+            if op in ('==', '!='):
+                if isinstance(left, int) and left == 0:
+                    left = Pointer(None, None, right.base_type, '')
+                if isinstance(right, int) and right == 0:
+                    right = Pointer(None, None, left.base_type, '')
+            if not isinstance(left, Pointer) or not isinstance(right, Pointer) or left.base_type != right.base_type:
+                self.fail(node, '指针类型不匹配或不支持此运算')
+            if op in ('==', '!='):
+                equal = (left.identity, left.index or 0) == (right.identity, right.index or 0)
+                return int(equal if op == '==' else not equal)
+            self.pointer_ref(left, node, address=True)
+            self.pointer_ref(right, node, address=True)
+            if left.identity != right.identity:
+                self.fail(node, '指针相减和顺序比较要求指向同一对象')
+            a, b = left.index or 0, right.index or 0
+            if op == '-':
+                return a - b
+            if op in ('<', '<=', '>', '>='):
+                return int({'<': a < b, '<=': a <= b, '>': a > b, '>=': a >= b}[op])
+            self.fail(node, '不支持此指针运算')
         if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
             self.fail(node, '运算需要数值')
         both_int = isinstance(left, int) and isinstance(right, int)
@@ -200,6 +289,10 @@ class Runtime:
                 return self.convert(float(node.value.rstrip('fFlL')), 'double', node)
             self.fail(node, '字符串只能作为 printf 的格式文本')
         if isinstance(node, (ast.ID, ast.ArrayRef)):
+            if isinstance(node, ast.ID):
+                cell = self.cell(node.name, node)
+                if isinstance(cell.value, list):
+                    return Pointer(cell.identity, 0, cell.type, node.name)
             return self.read(self.reference(node), node)
         if isinstance(node, ast.Assignment):
             ref = self.reference(node.lvalue)
@@ -216,6 +309,22 @@ class Runtime:
                 return int(self.truth(left, node.left) or self.truth(self.evaluate(node.right), node.right))
             return self.binary(node.op, left, self.evaluate(node.right), node)
         if isinstance(node, ast.UnaryOp):
+            if node.op == '&':
+                if isinstance(node.expr, ast.UnaryOp) and node.expr.op == '*':
+                    value, _ = self.evaluate_sources(node.expr.expr)
+                    if not isinstance(value, Pointer):
+                        self.fail(node, '取地址和解引用需要指针')
+                    return value
+                if isinstance(node.expr, ast.ArrayRef):
+                    value, _ = self.evaluate_sources(node.expr.name)
+                    offset, _ = self.evaluate_sources(node.expr.subscript)
+                    return self.pointer_offset(value, offset, node)
+                name, cell, index = self.reference(node.expr, address=True)
+                if cell.type.endswith('*'):
+                    self.fail(node, '不支持多级指针')
+                return Pointer(cell.identity, index, cell.type, name)
+            if node.op == '*':
+                return self.read(self.reference(node), node)
             if node.op in ('p++', 'p--', '++', '--'):
                 ref = self.reference(node.expr)
                 old = self.read(ref, node)
@@ -225,10 +334,10 @@ class Runtime:
             if node.op == '-' and isinstance(node.expr, ast.Constant) and node.expr.type == 'int':
                 return self.convert(-integer_literal(node.expr.value), 'int', node)
             value = self.evaluate(node.expr)
+            if node.op == '!':
+                return int(not self.truth(value, node))
             if not isinstance(value, (int, float)):
                 self.fail(node, '一元运算需要数值；srand 没有返回值')
-            if node.op == '!':
-                return int(not value)
             return self.convert(value if node.op == '+' else -value, 'int' if isinstance(value, int) else 'double', node)
         if isinstance(node, ast.ExprList):
             for expr in node.exprs[:-1]:

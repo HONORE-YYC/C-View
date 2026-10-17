@@ -131,12 +131,16 @@ class Program:
                         self.fail(param, '数组参数容量必须为整数常量表达式')
                     self._check(type_node.dim)
                 type_node = type_node.type
-            if not isinstance(type_node, ast.TypeDecl):
-                self.fail(param, '函数参数仅支持数值或一维数组，不支持指针')
-            types.append((self._scalar_type(type_node), array))
+            pointer = isinstance(type_node, ast.PtrDecl)
+            parameter_type = self._scalar_type(type_node)
+            types.append((parameter_type.rstrip('*'), array or pointer))
         return params, return_type, (return_type, tuple(types))
 
     def _scalar_type(self, node, allow_void=False):
+        if isinstance(node, ast.PtrDecl):
+            if node.quals or not isinstance(node.type, ast.TypeDecl):
+                self.fail(node, '仅支持单级数值指针，不支持指针修饰符或多级指针')
+            return self._scalar_type(node.type) + '*'
         supported = ('int', 'float', 'double', 'void') if allow_void else ('int', 'float', 'double')
         if (not isinstance(node, ast.TypeDecl) or node.quals
                 or not isinstance(node.type, ast.IdentifierType)
@@ -181,7 +185,7 @@ class Program:
             return
         if depth > 100:
             self.fail(node, '表达式或代码块嵌套过深（最多 100 层）')
-        allowed = (ast.Compound, ast.Decl, ast.TypeDecl, ast.IdentifierType, ast.ArrayDecl,
+        allowed = (ast.Compound, ast.Decl, ast.TypeDecl, ast.IdentifierType, ast.ArrayDecl, ast.PtrDecl,
                    ast.InitList, ast.Constant, ast.ID, ast.Assignment, ast.BinaryOp,
                    ast.UnaryOp, ast.ArrayRef, ast.If, ast.For, ast.While, ast.Break,
                    ast.Continue, ast.Return, ast.EmptyStatement, ast.DeclList,
@@ -190,6 +194,10 @@ class Program:
             self.fail(node, f'第一版暂不支持 {type(node).__name__}')
         if isinstance(node, ast.IdentifierType) and node.names not in (['int'], ['float'], ['double']):
             self.fail(node, '仅支持 int、float、double 类型')
+        if isinstance(node, ast.PtrDecl):
+            self._scalar_type(node)
+        if isinstance(node, ast.TypeDecl) and node.quals:
+            self.fail(node, '暂不支持类型修饰符')
         if isinstance(node, ast.Decl) and (node.quals or node.storage or node.funcspec or node.bitsize):
             self.fail(node, '暂不支持类型修饰符、存储修饰符或位域')
         if isinstance(node, ast.Decl) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
@@ -211,7 +219,7 @@ class Program:
             self.fail(node, f'暂不支持运算符 {node.op}')
         if isinstance(node, ast.BinaryOp) and node.op not in ('+', '-', '*', '/', '%', '<', '<=', '>', '>=', '==', '!=', '&&', '||'):
             self.fail(node, f'暂不支持运算符 {node.op}')
-        if isinstance(node, ast.UnaryOp) and node.op not in ('+', '-', '!', 'p++', 'p--', '++', '--'):
+        if isinstance(node, ast.UnaryOp) and node.op not in ('+', '-', '!', 'p++', 'p--', '++', '--', '&', '*'):
             self.fail(node, f'暂不支持运算符 {node.op}')
         if isinstance(node, (ast.Break, ast.Continue)) and not loops:
             self.fail(node, 'break/continue 只能出现在循环内')

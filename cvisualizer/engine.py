@@ -8,7 +8,7 @@ from pycparser import c_ast as ast
 
 from .language import CError, Location, Program
 from .runtime import Runtime
-from .motion import index_bindings, index_markers
+from .motion import index_bindings, index_markers, pointer_slots, indirect_index_slots
 
 
 @dataclass
@@ -65,6 +65,8 @@ class Engine:
         self.index_lanes = {}
         for array, _ in self._index_bindings:
             self.index_lanes[array] = self.index_lanes.get(array, 0) + 1
+        self.index_lanes['__pointer_slots__'] = pointer_slots(self.program)
+        self.index_lanes['__indirect_index_slots__'] = indirect_index_slots(self.program, self._index_bindings)
         self.max_steps, self.count = max_steps, 0
         self.last = None
         self._pending = None
@@ -94,11 +96,11 @@ class Engine:
 
     def _state(self):
         rt = self.runtime
-        return deepcopy((rt.scopes, rt.output, rt.random_state, rt.next_identity))
+        return deepcopy((rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity))
 
     def _restore(self, state):
         rt = self.runtime
-        rt.scopes, rt.output, rt.random_state, rt.next_identity = deepcopy(state)
+        rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity = deepcopy(state)
 
     def _consume(self, location):
         if self._operations >= self.max_steps:
@@ -135,6 +137,7 @@ class Engine:
         self._record_detail = expand_calls
         rt.reads, rt.writes = [], []
         rt.transfers = []
+        rt.write_targets = []
         try:
             description = action.run()
         except CError:

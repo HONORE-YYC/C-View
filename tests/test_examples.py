@@ -19,6 +19,7 @@ EXAMPLES = Path(__file__).resolve().parents[1] / 'cvisualizer/examples'
     ('macros.c', {'x': 7, 'pending': None}),
     ('animation.c', {'target': 4, 'i': 2, 'j': 1, 'a': [2, 4, 4, 2]}),
     ('functions.c', {'source': 3, 'answer': 6, 'numbers': [7, 8, 9, 10], 'total': 34}),
+    ('pointers.c', {'x': 7, 'values': [2, 17, 4, 5]}),
 ])
 def test_examples_execute_and_bindings_are_valid(filename, expected):
     path = EXAMPLES / filename

@@ -8,6 +8,8 @@ from PySide6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsRectItem, 
 
 from .structures import Binding, describe, KINDS
 from .animations import MotionLayer
+from .pointers import Pointer
+from .pointer_visuals import address_markers, RED
 
 
 def display(value):
@@ -43,6 +45,7 @@ class MemoryView(QGraphicsView):
         self.motion = MotionLayer(self.scene(), self)
         self._content_parent = None
         self._sections = {}
+        self._marker_sections, self._marker_targets = {}, {}
         self.scalar_scroll = QScrollBar(Qt.Orientation.Vertical, self.viewport())
         self.array_scroll = QScrollBar(Qt.Orientation.Vertical, self.viewport())
         for name, bar in [('scalar', self.scalar_scroll), ('array', self.array_scroll)]:
@@ -56,12 +59,14 @@ class MemoryView(QGraphicsView):
         bar = self.scalar_scroll if name == 'scalar' else self.array_scroll
         delta = -bar.value() - content.y()
         content.setY(-bar.value())
-        if name == 'array':
-            for key, item in self.motion.pointers.items():
+        for key, item in self.motion.pointers.items():
+            if self._marker_sections.get(key, 'array') == name:
                 shift = QPointF(0, delta)
                 item.moveBy(0, delta)
                 self.motion.destinations[key] += shift
                 self.motion.origins[key] += shift
+                if key in self._marker_targets:
+                    item.setVisible(self._visible_box(self._marker_targets[key]))
         self.motion.finish()
 
     def _begin_section(self, name, top, bottom, width, left=0):
@@ -177,8 +182,9 @@ class MemoryView(QGraphicsView):
                 for source, target in dict.fromkeys(event.transfers):
                     if (source in visible_before and source in self.boxes and target in self.boxes
                             and self._visible_box(source) and self._visible_box(target)):
+                        color = RED if isinstance(variables.get(target[0], {}).get('value'), Pointer) else '#16a34a'
                         transfers.append((self.boxes[source].mapRectToScene(self.boxes[source].rect()),
-                                          self.boxes[target].mapRectToScene(self.boxes[target].rect())))
+                                          self.boxes[target].mapRectToScene(self.boxes[target].rect()), color))
             destinations = {}
             lanes = {}
             for key, index in pointers.items():
@@ -187,7 +193,7 @@ class MemoryView(QGraphicsView):
                 lanes[array, identity] = lane+1
                 box = self.boxes.get((array, index, identity))
                 valid = box is not None
-                label = f'{counter} = {index}'
+                label = f"{counter} = {variables.get(counter, {}).get('value', index)}"
                 if valid:
                     rect = box.mapRectToScene(box.rect())
                     point = QPointF(rect.left()+18+min(lane*28, rect.width()-40), rect.top()-4)
@@ -197,6 +203,8 @@ class MemoryView(QGraphicsView):
                 else:
                     continue
                 destinations[key] = (point, label, lane if valid else 0, valid)
+            addresses, self._marker_sections, self._marker_targets = address_markers(self, variables, lanes)
+            destinations.update(addresses)
             summary = None
             if event and event.calls and not event.expanded and animate and not same_event:
                 effects = []
@@ -221,8 +229,13 @@ class MemoryView(QGraphicsView):
                 summary = {'calls': event.calls, 'rect': self._sections['array'][0].rect(), 'effects': effects}
             self.motion.start(transfers, destinations, previous, duration, animate and not same_event,
                               call_summary=summary)
-            for item in self.motion.pointers.values():
-                item.setParentItem(self._sections['array'][0])
+            for key, item in self.motion.pointers.items():
+                if key in addresses:
+                    item.setParentItem(self._address_clip)
+                    if key in self._marker_targets:
+                        item.setVisible(self._visible_box(self._marker_targets[key]))
+                else:
+                    item.setParentItem(self._sections['array'][0])
         finally:
             self._rendering = False
             self._restoring_offsets = None
@@ -239,6 +252,11 @@ class MemoryView(QGraphicsView):
         width = full_width-rail_width-28
         rail_left = width+28
         self.scene().setSceneRect(0, 0, self.viewport().width(), self.viewport().height())
+        self._address_clip = QGraphicsRectItem(0, 88, self.viewport().width(), max(1, height-88))
+        self._address_clip.setPen(QPen(Qt.PenStyle.NoPen))
+        self._address_clip.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape)
+        self._address_clip.setZValue(15)
+        self.scene().addItem(self._address_clip)
         columns = max(1, int((width-28)//150))
         box_width = (width-28)/columns-12
         y = 12
@@ -308,6 +326,9 @@ class MemoryView(QGraphicsView):
             # Reserve lanes from the program before counters enter/leave scope.
             pointer_count = self._data[4].get(cell.get('declaration'),
                 sum(key[0] == name and key[1] == cell['identity'] for key in self._data[3]))
+            pointer_count = max(pointer_count, self._data[4].get('__indirect_index_slots__', 0))
+            pointer_count += self._data[4].get('__pointer_slots__',
+                sum(isinstance(c['value'], Pointer) for c in variables.values()))
             marker_space = 20*max(0, pointer_count-1)
             y += note.boundingRect().height()+(42 if pointer_count else 12)+marker_space
             active = set(model.active)

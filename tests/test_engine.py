@@ -79,7 +79,7 @@ def test_runtime_errors(code, match):
 
 
 @pytest.mark.parametrize('code', [
-    'int *p;', 'struct A {int x;};', 'int a[2][2];',
+    'int **p;', 'struct A {int x;};', 'int a[2][2];',
     '#include <unknown.h>\nint x=1;',
     'int x=0; scanf("%d", &x);', 'break;', 'int a=1; a <<= 2;',
 ])

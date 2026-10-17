@@ -58,7 +58,7 @@ int main(void) {
     ('int f(int); double f(int x){return x;} int main(){return 0;}', '声明'),
     ('int f(int); int main(){return f(1);}', '定义'),
     ('int f(void x){return 0;} int main(){return 0;}', 'void'),
-    ('int f(int *x){return 0;} int main(){return 0;}', '参数'),
+    ('int f(int **x){return 0;} int main(){return 0;}', '指针'),
     ('int f(int a[2][2]){return 0;} int main(){return 0;}', '一维'),
     ('int f(int n, int a[n]){return 0;} int main(){return 0;}', '常量'),
     ('int f(int x,int x){return x;} int main(){return 0;}', '重复'),

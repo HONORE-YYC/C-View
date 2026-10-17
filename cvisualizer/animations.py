@@ -57,26 +57,27 @@ class TransferArrow(QGraphicsPathItem):
 
 
 class IndexPointer(QGraphicsItemGroup):
-    def __init__(self, label, lane=0, valid=True):
+    def __init__(self, label, lane=0, valid=True, color=None, sideways=False):
         super().__init__()
         self.setZValue(10+lane)
-        color = QColor('#2563eb' if valid else '#b45309')
+        color = QColor(color or ('#2563eb' if valid else '#b45309'))
         height = 16+lane*17
-        path = QPainterPath(QPointF(0, -height))
+        path = QPainterPath(QPointF(-24, 0) if sideways else QPointF(0, -height))
         if valid:
-            path.lineTo(0, -5)
+            path.lineTo(-5, 0) if sideways else path.lineTo(0, -5)
         stem = QGraphicsPathItem(path)
         stem.setPen(QPen(color, 2))
         self.addToGroup(stem)
         if valid:
-            head = QGraphicsPolygonItem(QPolygonF([QPointF(0, 0), QPointF(-4, -7), QPointF(4, -7)]))
+            points = [QPointF(0, 0), QPointF(-7, -4), QPointF(-7, 4)] if sideways else [QPointF(0, 0), QPointF(-4, -7), QPointF(4, -7)]
+            head = QGraphicsPolygonItem(QPolygonF(points))
             head.setPen(QPen(Qt.PenStyle.NoPen))
             head.setBrush(QBrush(color))
             self.addToGroup(head)
         text = QGraphicsSimpleTextItem(label)
         text.setFont(QFont('Microsoft YaHei UI', 9, QFont.Weight.Bold))
         text.setBrush(QBrush(color))
-        text.setPos(6, -height-9)
+        text.setPos(-text.boundingRect().width()-28, -text.boundingRect().height()/2) if sideways else text.setPos(6, -height-9)
         # A white backing keeps labels readable while passing over other cells.
         from PySide6.QtWidgets import QGraphicsRectItem
         background = QGraphicsRectItem(text.boundingRect().adjusted(-2, -1, 2, 1))
@@ -85,6 +86,7 @@ class IndexPointer(QGraphicsItemGroup):
         background.setPos(text.pos())
         self.addToGroup(background)
         self.addToGroup(text)
+        self.setToolTip(label)
 
 
 class MotionLayer(QObject):
@@ -119,8 +121,9 @@ class MotionLayer(QObject):
     def start(self, transfers, pointers, previous, duration, animate=True, call_summary=None):
         self.clear()
         moving = False
-        for key, (point, label, lane, valid) in pointers.items():
-            item = IndexPointer(label, lane, valid)
+        for key, spec in pointers.items():
+            point, label, lane, valid, *style = spec
+            item = IndexPointer(label, lane, valid, *style)
             self.scene.addItem(item)
             self.pointers[key], self.destinations[key] = item, point
             origin = previous.get(key, point) if animate else point
@@ -128,8 +131,8 @@ class MotionLayer(QObject):
             item.setPos(origin)
             moving |= origin != point
         if animate:
-            for source, target in transfers:
-                arrow = TransferArrow(source, target)
+            for transfer in transfers:
+                arrow = TransferArrow(*transfer)
                 self.scene.addItem(arrow)
                 self.arrows.append(arrow)
             if call_summary and call_summary.get('calls'):

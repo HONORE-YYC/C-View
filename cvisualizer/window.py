@@ -93,7 +93,8 @@ class MainWindow(QMainWindow):
         for filename, label in [('basics.c', '01 变量、运算与循环'), ('list.c', '02 顺序表插入与删除'),
                                 ('stack.c', '03 栈的入栈与出栈'), ('queue.c', '04 循环队列与回绕'),
                                 ('mixed.c', '05 同一程序，多种结构'), ('macros.c', '06 宏与随机数'),
-                                ('animation.c', '07 赋值与下标动画'), ('functions.c', '08 函数与数组参数')]:
+                                ('animation.c', '07 赋值与下标动画'), ('functions.c', '08 函数与数组参数'),
+                                ('pointers.c', '09 指针与取地址')]:
             self.examples.addItem(label, filename)
         self.examples.activated.connect(self.open_example)
         header.addWidget(self.examples)
@@ -210,7 +211,7 @@ class MainWindow(QMainWindow):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         root.addWidget(self.status)
-        footer = QLabel('教学子集：变量、数组、循环、非递归函数、#define、printf、abs/rand/srand。兼容 cstdlib / stdlib.h；暂不支持指针与 struct。')
+        footer = QLabel('教学子集：变量、数组、单级指针、循环、非递归函数、宏和常用标准库。暂不支持结构体、动态内存和递归。')
         footer.setObjectName('muted')
         footer.setWordWrap(True)
         root.addWidget(footer)
