@@ -60,7 +60,7 @@ int main(void) {
     ('int f(void x){return 0;} int main(){return 0;}', 'void'),
     ('int f(int **x){return 0;} int main(){return 0;}', '指针'),
     ('int f(int a[2][2]){return 0;} int main(){return 0;}', '一维'),
-    ('int f(int n, int a[n]){return 0;} int main(){return 0;}', '常量'),
+    ('int n=2; int a[n]; int main(){return 0;}', '常量'),
     ('int f(int x,int x){return x;} int main(){return 0;}', '重复'),
     ('int f(){return 1;} int value=f(); int main(){return value;}', '全局'),
     ('int value=rand(); int main(){return value;}', '全局'),

@@ -29,7 +29,7 @@ def test_array_and_pointer_parameter_declarations_are_compatible(prototype, defi
 
 @pytest.mark.parametrize('declaration', [
     'int **p;', 'void *p;', 'int *p[2];', 'int (*p)[2];', 'int (*p)(int);',
-    'const int *p;', 'int *const p;', 'struct A {int x;};', 'typedef int number;',
+    'restrict int *p;', 'int *static p;', 'struct A {int x;};', 'typedef int number;',
 ])
 def test_unsupported_pointer_shapes_and_types_are_rejected(declaration):
     with pytest.raises(CError):
@@ -39,7 +39,7 @@ def test_unsupported_pointer_shapes_and_types_are_rejected(declaration):
 @pytest.mark.parametrize('signature', [
     'int **f(void)', 'void *f(void)', 'int *f(int **p)',
     'int *f(int *p[2])', 'int *f(int (*p)[2])', 'int *f(int (*p)(int))',
-    'int *f(void *p)', 'int *f(const int *p)', 'int *f(int *const p)',
+    'int *f(void *p)', 'int *f(restrict int p)', 'int *f(int *static p)',
     'int *main(void)',
 ])
 def test_unsupported_pointer_function_signatures_are_rejected(signature):

@@ -6,7 +6,7 @@ from PySide6.QtGui import QAction, QKeySequence, QCursor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSlider, QSplitter, QPlainTextEdit,
-    QFileDialog, QMessageBox, QDialog, QFrame, QMenu,
+    QFileDialog, QMessageBox, QDialog, QFrame, QMenu, QInputDialog,
 )
 
 from .bindings import BindingDialog, read_bindings, write_bindings
@@ -94,7 +94,8 @@ class MainWindow(QMainWindow):
                                 ('stack.c', '03 栈的入栈与出栈'), ('queue.c', '04 循环队列与回绕'),
                                 ('mixed.c', '05 同一程序，多种结构'), ('macros.c', '06 宏与随机数'),
                                 ('animation.c', '07 赋值与下标动画'), ('functions.c', '08 函数与数组参数'),
-                                ('pointers.c', '09 指针与取地址')]:
+                                ('pointers.c', '09 指针与取地址'), ('input.c', '10 类型与 scanf 输入'),
+                                ('strings_arrays.c', '11 数组、字符串与 const'), ('large_arrays.c', '12 大数组与滚动查看')]:
             self.examples.addItem(label, filename)
         self.examples.activated.connect(self.open_example)
         header.addWidget(self.examples)
@@ -266,7 +267,7 @@ class MainWindow(QMainWindow):
         if self.controller is not None:
             return True
         try:
-            self.controller = Controller(self.editor.toPlainText())
+            self.controller = Controller(self.editor.toPlainText(), input_provider=self.request_input)
             self._preview_program = self.controller.engine.program
             self.editor.set_playable_lines(loc.line for loc in self.controller.targets)
             self.targets.clear()
@@ -281,6 +282,18 @@ class MainWindow(QMainWindow):
 
     def prepare_targets(self):
         return self.ensure_controller()
+
+    def request_input(self, prompt):
+        # A modal dialog runs a nested Qt event loop: stop playback before opening it.
+        # The normal refresh after this action resumes the timer, if appropriate.
+        self.timer.stop()
+        self.output.setPlainText(prompt['output'])
+        self.status.setText(f'等待输入 · 第 {prompt["line"]} 行')
+        text, accepted = QInputDialog.getText(
+            self, 'scanf 输入',
+            f'第 {prompt["line"]} 行：{prompt["statement"]}\n'
+            '请输入数据（多个值可用空格分隔，确认相当于按回车）：')
+        return text if accepted else None
 
     def function_names(self):
         return tuple(self._preview_program.functions) if self._preview_program else ()

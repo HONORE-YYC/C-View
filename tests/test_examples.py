@@ -20,10 +20,15 @@ EXAMPLES = Path(__file__).resolve().parents[1] / 'cvisualizer/examples'
     ('animation.c', {'target': 4, 'i': 2, 'j': 1, 'a': [2, 4, 4, 2]}),
     ('functions.c', {'source': 3, 'answer': 6, 'numbers': [7, 8, 9, 10], 'total': 34}),
     ('pointers.c', {'x': 7, 'values': [2, 17, 4, 5]}),
+    ('input.c', {'count': 3000000000, 'price': 2.5, 'grade': 65, 'matched': 4}),
+    ('strings_arrays.c', {'count': 3, 'total': 12, 'length': 6, 'same': 0}),
+    ('large_arrays.c', {'capacity': 1000000}),
 ])
 def test_examples_execute_and_bindings_are_valid(filename, expected):
     path = EXAMPLES / filename
     engine = Engine(path.read_text(encoding='utf-8'))
+    if filename == 'input.c':
+        engine.runtime.input_provider = lambda prompt: '3000000000 2.5 A Alice'
     while engine.peek():
         engine.step()
     snapshot = engine.runtime.snapshot()

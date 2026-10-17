@@ -81,7 +81,7 @@ def test_runtime_errors(code, match):
 @pytest.mark.parametrize('code', [
     'int **p;', 'struct A {int x;};', 'int a[2][2];',
     '#include <unknown.h>\nint x=1;',
-    'int x=0; scanf("%d", &x);', 'break;', 'int a=1; a <<= 2;',
+    'int x=0; unknown_input("%d", &x);', 'break;', 'int a=1; a <<= 2;',
 ])
 def test_unsupported_code_rejected_before_execution(code):
     with pytest.raises(CError):

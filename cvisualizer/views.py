@@ -10,11 +10,15 @@ from .structures import Binding, describe, KINDS
 from .animations import MotionLayer
 from .pointers import Pointer
 from .pointer_visuals import address_markers, RED
+from .numeric import Char
+import math
 
 
 def display(value):
     if value is None:
         return '?'
+    if isinstance(value, Char):
+        return f'{repr(chr(value))} ({int(value)})'
     if isinstance(value, float):
         return f'{value:.6g}'
     return str(value)
@@ -42,6 +46,10 @@ class MemoryView(QGraphicsView):
         self._view_offsets = {}
         self._restoring_offsets = None
         self._function_context = False
+        self._array_scale = 1
+        self._array_extent = 0
+        self._array_exact_offset = None
+        self._array_virtual = False
         self.motion = MotionLayer(self.scene(), self)
         self._content_parent = None
         self._sections = {}
@@ -55,10 +63,16 @@ class MemoryView(QGraphicsView):
     def _scroll_section(self, name):
         if self._rendering or name not in self._sections:
             return
+        if name == 'array':
+            self._array_exact_offset = None
+        if name == 'array' and self._array_virtual:
+            self.render(*self._data, animate=False, force=True)
+            return
         clip, content = self._sections[name]
         bar = self.scalar_scroll if name == 'scalar' else self.array_scroll
-        delta = -bar.value() - content.y()
-        content.setY(-bar.value())
+        target_y = self._draw_offset-self._array_offset() if name == 'array' else -bar.value()
+        delta = target_y - content.y()
+        content.setY(target_y)
         for key, item in self.motion.pointers.items():
             if self._marker_sections.get(key, 'array') == name:
                 shift = QPointF(0, delta)
@@ -68,6 +82,25 @@ class MemoryView(QGraphicsView):
                 if key in self._marker_targets:
                     item.setVisible(self._visible_box(self._marker_targets[key]))
         self.motion.finish()
+
+    def _array_offset(self):
+        if self._array_exact_offset is not None:
+            return self._array_exact_offset
+        maximum = self.array_scroll.maximum()
+        return self.array_scroll.value()*self._array_extent//maximum if maximum else 0
+
+    def _set_array_offset(self, offset):
+        self._array_exact_offset = min(self._array_extent, max(0, int(offset)))
+        bar = self.array_scroll
+        bar.blockSignals(True)
+        bar.setValue(self._array_exact_offset*bar.maximum()//self._array_extent if self._array_extent else 0)
+        bar.blockSignals(False)
+        self.render(*self._data, animate=False, force=True)
+
+    def _content_y(self, y):
+        if self._content_parent is not None and self._sections.get('array', (None,None))[1] is self._content_parent:
+            return y-self._draw_offset
+        return y
 
     def _begin_section(self, name, top, bottom, width, left=0):
         clip = QGraphicsRectItem(left, top, width, max(1, bottom-top))
@@ -83,15 +116,23 @@ class MemoryView(QGraphicsView):
         clip, content = self._sections[name]
         bar = self.scalar_scroll if name == 'scalar' else self.array_scroll
         rect = clip.rect()
-        bar.blockSignals(True)
-        bar.setPageStep(int(rect.height()))
-        bar.setRange(0, max(0, int(bottom-rect.bottom())))
+        offset = self._array_offset() if name == 'array' else bar.value()
         if self._restoring_offsets is not None:
-            bar.setValue(self._restoring_offsets[0 if name == 'scalar' else 1])
+            offset = self._restoring_offsets[0 if name == 'scalar' else 1]
+        extent = max(0, int(bottom)-int(rect.bottom()))
+        maximum = min(1_000_000_000, extent)
+        scale = extent / maximum if maximum else 1
+        if name == 'array':
+            self._array_extent, self._array_scale = extent, scale
+            self._array_exact_offset = int(min(offset, extent))
+        bar.blockSignals(True)
+        bar.setPageStep(max(1, int(rect.height()/scale)))
+        bar.setRange(0, maximum)
+        bar.setValue(int(min(offset, extent))*maximum//extent if extent else 0)
         bar.blockSignals(False)
         bar.setGeometry(int(rect.right()), int(rect.top()), 16, int(rect.height()))
         bar.setVisible(bar.maximum() > 0)
-        content.setY(-bar.value())
+        content.setY(self._draw_offset-self._array_offset() if name == 'array' else -bar.value())
         self._content_parent = None
 
     def _visible_box(self, key):
@@ -107,7 +148,10 @@ class MemoryView(QGraphicsView):
                 bar = self.scalar_scroll if name == 'scalar' else self.array_scroll
                 pixels = event.pixelDelta().y()
                 delta = pixels if pixels else event.angleDelta().y() / 120 * bar.singleStep() * 3
-                bar.setValue(bar.value()-int(delta))
+                if name == 'array':
+                    self._set_array_offset(self._array_offset()-int(delta))
+                else:
+                    bar.setValue(bar.value()-int(delta))
                 event.accept()
                 return
         event.ignore()
@@ -119,7 +163,7 @@ class MemoryView(QGraphicsView):
         if self._content_parent is not None:
             item.setParentItem(self._content_parent)
         item.setDefaultTextColor(QColor(color))
-        item.setPos(x, y)
+        item.setPos(x, self._content_y(y))
         return item
 
     def box(self, name, value, x, y, width, read=False, written=False, purple=False, compact=False):
@@ -131,7 +175,7 @@ class MemoryView(QGraphicsView):
             border = '#60a5fa'
         if written:
             border = '#f59e0b'
-        rect = self.scene().addRect(x, y, width, 36 if compact else 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(QColor(fill)))
+        rect = self.scene().addRect(x, self._content_y(y), width, 36 if compact else 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(QColor(fill)))
         rect.setParentItem(self._content_parent)
         rect.setData(0, name)
         text = name if value is None else f'{name} = {display(value)}'
@@ -160,13 +204,15 @@ class MemoryView(QGraphicsView):
         context = event.function if event else ''
         self._restoring_offsets = None
         if context != self._context:
-            self._view_offsets[self._context] = (self.scalar_scroll.value(), self.array_scroll.value())
+            self._view_offsets[self._context] = (self.scalar_scroll.value(), self._array_offset())
             self._restoring_offsets = self._view_offsets.get(context, (0, 0))
             self._context = context
         if event is None and not variables:
             self._view_offsets.clear()
             self._restoring_offsets = (0, 0)
         self._function_context = bool(context)
+        self._array_virtual = any(isinstance(c['value'], list) and len(c['value']) > 64 for c in variables.values())
+        self._draw_offset = self._restoring_offsets[1] if self._restoring_offsets is not None else self._array_offset()
         previous = {key: QPointF(item.pos()) for key, item in self.motion.pointers.items()}
         was_busy = self.motion.busy
         visible_before = {key for key in self.boxes if self._visible_box(key)}
@@ -198,7 +244,7 @@ class MemoryView(QGraphicsView):
                     rect = box.mapRectToScene(box.rect())
                     point = QPointF(rect.left()+18+min(lane*28, rect.width()-40), rect.top()-4)
                 elif (array, identity) in self.array_anchors:
-                    point = self.array_anchors[array, identity] + QPointF(0, lane*22-self.array_scroll.value())
+                    point = self.array_anchors[array, identity] + QPointF(0, lane*22+self._draw_offset-self._array_offset())
                     label += '（越界）' if not 0 <= index < len(variables[array]['value']) else '（未绘制）'
                 else:
                     continue
@@ -212,7 +258,7 @@ class MemoryView(QGraphicsView):
                     cell = variables.get(name)
                     if not cell:
                         continue
-                    indices = range(min(64, len(cell['value']))) if index is None and isinstance(cell['value'], list) else [index]
+                    indices = [key[1] for key in self.boxes if key[0] == name] if index is None and isinstance(cell['value'], list) else [index]
                     for target_index in indices:
                         key = name, target_index, cell['identity']
                         item = self.boxes.get(key)
@@ -241,6 +287,8 @@ class MemoryView(QGraphicsView):
             self._restoring_offsets = None
         if was_busy and not self.motion.busy:
             self.motion.settled.emit()
+        if self._array_virtual and abs(self._draw_offset - self._array_offset()) > 1:
+            self.render(*self._data, animate=False, force=True)
 
     def _draw(self, variables, bindings, event):
         self.scene().clear()
@@ -317,7 +365,7 @@ class MemoryView(QGraphicsView):
                 continue
             model = describe(bound.get(name, Binding(name)), variables)
             self.label(f'{name}  /  {KINDS[model.kind]}', 16, y, 13, '#0f172a', True)
-            self.array_anchors[name, cell['identity']] = QPointF(width-170, y+20)
+            self.array_anchors[name, cell['identity']] = QPointF(width-170, self._content_y(y+20))
             y += 34
             note = self.label(model.error or model.note or f'capacity = {len(model.values)}', 16, y, 9,
                               '#b45309' if model.error else '#64748b')
@@ -330,17 +378,21 @@ class MemoryView(QGraphicsView):
             pointer_count += self._data[4].get('__pointer_slots__',
                 sum(isinstance(c['value'], Pointer) for c in variables.values()))
             marker_space = 20*max(0, pointer_count-1)
-            y += note.boundingRect().height()+(42 if pointer_count else 12)+marker_space
-            active = set(model.active)
-            visible = list(range(min(64, len(model.values))))
+            y += math.ceil(note.boundingRect().height())+(42 if pointer_count else 12)+marker_space
+            active = model.active
             vertical = model.kind == 'stack'
             labels_below = not vertical or width < box_width+190
-            if vertical:
-                visible.reverse()
-            max_bottom = y
-            for pos, index in enumerate(visible):
+            row_height = ((112 if labels_below else 96) if vertical else 112)+marker_space
+            row_columns = 1 if vertical else columns
+            row_count = (len(model.values)+row_columns-1)//row_columns
+            start_row, end_row = 0, row_count
+            if self._array_virtual:
+                start_row = max(0, (self._draw_offset+88-y)//row_height-1)
+                end_row = min(row_count, max(0, (self._draw_offset+height-y+row_height-1)//row_height+1))
+            for pos in range(start_row*row_columns, min(len(model.values), end_row*row_columns)):
+                index = len(model.values)-1-pos if vertical else pos
                 x = 24 if vertical else 18+(pos % columns)*(box_width+12)
-                cy = y+pos*((112 if labels_below else 96)+marker_space) if vertical else y+(pos//columns)*(112+marker_space)
+                cy = y+(pos//row_columns)*row_height
                 read, written = self.activity(name, index, cell, event)
                 self.boxes[name, index, cell['identity']] = self.box(f'{name}[{index}]', model.values[index], x, cy, box_width, read, written)
                 if model.kind != 'array':
@@ -350,19 +402,15 @@ class MemoryView(QGraphicsView):
                 if markers:
                     self.label(' / '.join(markers), x if labels_below else x+box_width+75,
                                cy+60 if labels_below else cy+8, 9, '#0f766e', True)
-                max_bottom = max(max_bottom, cy+(82 if labels_below else 58))
-            y = max_bottom+10
-            if len(model.values) > 64:
-                self.label(f'仅绘制前 64 / {len(model.values)} 个单元；执行器处理完整数组', 18, y, 9, '#64748b')
-                y += 32
+            y += max(0, row_count-1)*row_height+(82 if labels_below else 58)+10
             if model.kind in ('list', 'queue'):
                 order = ' → '.join(display(v) for v in model.logical[:20]) or '（空）'
                 if len(model.logical) > 20:
                     order += ' → …'
                 text = self.label('逻辑顺序：'+order, 18, y, 9, '#0f766e')
                 text.setTextWidth(width-36)
-                y += text.boundingRect().height()+12
-            line = self.scene().addLine(16, y+4, width-4, y+4, QPen(QColor('#e2e8f0')))
+                y += math.ceil(text.boundingRect().height())+12
+            line = self.scene().addLine(16, self._content_y(y+4), width-4, self._content_y(y+4), QPen(QColor('#e2e8f0')))
             line.setParentItem(self._content_parent)
             y += 30
         self._end_section('array', y)

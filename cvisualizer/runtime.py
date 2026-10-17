@@ -3,13 +3,19 @@ import ast as literal_ast
 from dataclasses import dataclass
 from copy import deepcopy
 import math
-import re
 
 from pycparser import c_ast as ast
 
 from .language import CError
 from .motion import declaration_key
 from .pointers import Pointer
+from .numeric import Long, Char, type_name
+from . import formatted_io
+from . import standard_library
+from .arrays import Array
+from .qualifiers import qualifiers
+from dataclasses import replace
+import sys
 
 
 @dataclass
@@ -18,9 +24,30 @@ class Cell:
     value: object
     identity: int
     declaration: tuple
+    readonly: bool = False
+    pointee_const: bool = False
+
+
+class Reference(tuple):
+    def __new__(cls, name, cell, index, readonly=False):
+        result = super().__new__(cls, (name, cell, index))
+        result.readonly = readonly
+        return result
+
+
+class Sources(list):
+    def __init__(self):
+        super().__init__()
+        self.seen = set()
+
+    def add(self, source):
+        if source not in self.seen:
+            self.seen.add(source)
+            self.append(source)
 
 
 def integer_literal(text):
+    text = text.rstrip('lL')
     if text.lower().startswith('0x'):
         return int(text, 16)
     return int(text, 8 if len(text) > 1 and text.startswith('0') else 10)
@@ -39,6 +66,12 @@ class Runtime:
         self.transfers = []
         self._source_frames = []
         self.call_function = None
+        self.input_provider = None
+        self.input_text = ''
+        self.input_position = 0
+        self.literals = {}
+        self.literal_pool = {}
+        self.consume = None
 
     def fail(self, node, message):
         self.program.fail(node, message)
@@ -65,6 +98,8 @@ class Runtime:
                        'declaration': cell.declaration} for name, cell in self.visible_cells().items()}
 
     def find_identity(self, identity):
+        if identity in self.literals:
+            return f'字符串{identity}', self.literals[identity]
         for scopes in [self.scopes] + list(reversed(self.callers)):
             for scope in reversed(scopes):
                 for name, cell in scope.items():
@@ -90,7 +125,7 @@ class Runtime:
                 name = alias
                 break
         index = offset if isinstance(cell.value, list) else None
-        return name, cell, index
+        return Reference(name, cell, index, pointer.readonly)
 
     def pointer_offset(self, pointer, amount, node):
         self.pointer_ref(pointer, node, address=True)
@@ -102,7 +137,7 @@ class Runtime:
         if not 0 <= index <= size:
             self.fail(node, '指针偏移越界')
         return Pointer(pointer.identity, index if isinstance(target.value, list) or index else None,
-                       pointer.base_type, pointer.name)
+                       pointer.base_type, pointer.name, pointer.readonly)
 
     def cell(self, name, node):
         for scope in reversed(self.scopes):
@@ -110,22 +145,27 @@ class Runtime:
                 return scope[name]
         self.fail(node, f'变量 {name} 未声明')
 
-    def convert(self, value, type_name, node):
+    def convert(self, value, type_name, node, pointee_const=False):
         if type_name.endswith('*'):
             if isinstance(value, int) and value == 0:
                 return Pointer(None, None, type_name[:-1], '')
             if not isinstance(value, Pointer) or value.base_type != type_name[:-1]:
                 self.fail(node, '指针类型不匹配；只可赋同类型地址或空指针 0')
-            return value
+            if value.readonly and not pointee_const:
+                self.fail(node, '不能丢弃指针目标的 const 只读修饰符')
+            return replace(value, readonly=pointee_const)
         if not isinstance(value, (int, float)):
             self.fail(node, '需要数值，不能使用整个数组或字符串参与运算')
         if isinstance(value, float) and not math.isfinite(value):
             self.fail(node, '浮点数溢出或不是有限数值')
-        if type_name == 'int':
+        if type_name in ('int', 'long', 'char'):
             result = int(value)
-            if not -2147483648 <= result <= 2147483647:
-                self.fail(node, '32 位有符号整数溢出')
-            return result
+            if type_name == 'char':
+                return Char(result % 256)
+            bits = 64 if type_name == 'long' else 32
+            if not -(2 ** (bits-1)) <= result < 2 ** (bits-1):
+                self.fail(node, f'{bits} 位有符号整数溢出')
+            return Long(result) if type_name == 'long' else result
         return float(value)
 
     def truth(self, value, node):
@@ -146,27 +186,48 @@ class Runtime:
         base = node.type.type if array or pointer else node.type
         if not isinstance(base, ast.TypeDecl):
             self.fail(node, '不支持此声明')
-        type_name = base.type.names[0] + ('*' if pointer else '')
+        declared_type = type_name(base.type.names) + ('*' if pointer else '')
+        readonly, pointee_const = qualifiers(node.type)
         if array:
-            size = self.evaluate(node.type.dim)
-            if not 1 <= size <= 4096:
-                self.fail(node, '数组容量必须在 1–4096 之间')
-            live = sum(len(c.value) for s in self.scopes for c in s.values() if isinstance(c.value, list))
-            if live + size > 16384:
-                self.fail(node, '数组总元素超过 16384 个')
-            initial = [None] * size
+            readonly, pointee_const = 'const' in base.quals, False
+        string_initial = None
+        if array and declared_type == 'char' and isinstance(node.init, ast.Constant) and node.init.type == 'string':
+            string_initial = self.string_literal(node.init)
+        if array:
+            if node.type.dim is None:
+                size = len(string_initial)+1 if string_initial is not None else len(node.init.exprs or []) if isinstance(node.init, ast.InitList) else 0
+                if not size:
+                    self.fail(node, '省略数组容量时需要初始化列表或字符串')
+            else:
+                size = self.evaluate(node.type.dim)
+            if not isinstance(size, int) or size <= 0:
+                self.fail(node, '数组容量必须为正整数')
+            if size > sys.maxsize:
+                self.fail(node, '数组容量超出本机可表示的索引范围')
+            initial = Array(size)
         else:
-            initial = self.convert(0, type_name, node) if global_scope else None
-        scope[node.name] = Cell(type_name, initial, self.next_identity, declaration_key(node))
+            initial = self.convert(0, declared_type, node) if global_scope else None
+        scope[node.name] = Cell(declared_type, initial, self.next_identity, declaration_key(node))
+        scope[node.name].pointee_const = pointee_const
         self.next_identity += 1
         if array:
+            if string_initial is not None:
+                text = string_initial
+                if len(text) > size or any(ord(c) > 255 for c in text):
+                    self.fail(node, '字符串超出字符数组容量或包含非单字节字符')
+                scope[node.name].value = Array(size, Char(0))
+                for i, char in enumerate(text):
+                    self.write((node.name, scope[node.name], i), ord(char), node)
+                self.writes.append((node.name, None))
+                scope[node.name].readonly = readonly
+                return f'定义字符数组 {node.name}'
             if node.init is not None and not isinstance(node.init, ast.InitList):
                 self.fail(node, '数组需要初始化列表，例如 {1, 2, 3}')
             exprs = node.init.exprs if node.init else []
             if len(exprs) > size:
                 self.fail(node, '数组初始化元素多于容量')
             if node.init or global_scope:
-                scope[node.name].value = [self.convert(0, type_name, node)] * size
+                scope[node.name].value = Array(size, self.convert(0, declared_type, node))
             for i, expr in enumerate(exprs):
                 value, sources = self.evaluate_sources(expr)
                 self.write((node.name, scope[node.name], i), value, expr, sources)
@@ -174,6 +235,7 @@ class Runtime:
             value, sources = self.evaluate_sources(node.init)
             self.write((node.name, scope[node.name], None), value, node.init, sources)
         self.writes.append((node.name, None))
+        scope[node.name].readonly = readonly
         return f'定义 {node.name} = {scope[node.name].value}'
 
     def reference(self, node, address=False):
@@ -204,7 +266,7 @@ class Runtime:
         return value
 
     def evaluate_sources(self, node):
-        sources = []
+        sources = Sources()
         self._source_frames.append(sources)
         try:
             return self.evaluate(node), sources
@@ -212,12 +274,13 @@ class Runtime:
             self._source_frames.pop()
 
     def contribute(self, source):
-        if self._source_frames and source not in self._source_frames[-1]:
-            self._source_frames[-1].append(source)
+        if self._source_frames:
+            self._source_frames[-1].add(source)
 
     def write(self, ref, value, node, sources=()):
         name, cell, index = ref
-        converted = self.convert(value, cell.type, node)
+        self.check_writable(ref, node)
+        converted = self.convert(value, cell.type, node, cell.pointee_const)
         if index is None:
             cell.value = converted
         else:
@@ -227,6 +290,33 @@ class Runtime:
         target = name, index, cell.identity
         self.transfers.extend((source, target) for source in sources if source != target)
         return converted
+
+    def check_writable(self, ref, node):
+        if ref[1].readonly or getattr(ref, 'readonly', False):
+            self.fail(node, '不能修改 const 只读对象')
+
+    def string_literal(self, node):
+        try:
+            text = literal_ast.literal_eval(node.value)
+        except (ValueError, SyntaxError):
+            self.fail(node, '字符串转义格式不受支持')
+        if any(ord(c) > 255 for c in text):
+            self.fail(node, '字符数组需要 0–255 单字节字符')
+        return text
+
+    def literal_pointer(self, node):
+        text = self.string_literal(node)
+        if text in self.literal_pool:
+            identity = self.literal_pool[text]
+            return Pointer(identity, 0, 'char', f'字符串{identity}', True)
+        value = Array(len(text)+1, Char(0))
+        for i, char in enumerate(text):
+            value[i] = Char(ord(char))
+        identity = self.next_identity
+        self.next_identity += 1
+        self.literals[identity] = Cell('char', value, identity, ('literal', 0, 0), True)
+        self.literal_pool[text] = identity
+        return Pointer(identity, 0, 'char', f'字符串{identity}', True)
 
     def binary(self, op, left, right, node):
         if isinstance(left, Pointer) or isinstance(right, Pointer):
@@ -257,13 +347,14 @@ class Runtime:
         if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
             self.fail(node, '运算需要数值')
         both_int = isinstance(left, int) and isinstance(right, int)
+        integer_type = 'long' if isinstance(left, Long) or isinstance(right, Long) else 'int'
         if op in ('/', '%') and right == 0:
             self.fail(node, '除零：除数或取余的右操作数不能为 0')
         if op == '%':
             if not both_int:
                 self.fail(node, '取余运算要求两个整数')
             quotient = (abs(left) // abs(right)) * (-1 if (left < 0) != (right < 0) else 1)
-            self.convert(quotient, 'int', node)
+            self.convert(quotient, integer_type, node)
             result = left - quotient * right
         elif op == '/' and both_int:
             result = (abs(left) // abs(right)) * (-1 if (left < 0) != (right < 0) else 1)
@@ -279,12 +370,23 @@ class Runtime:
             comparisons = {'<': left < right, '<=': left <= right, '>': left > right,
                            '>=': left >= right, '==': left == right, '!=': left != right}
             return int(comparisons[op])
-        return self.convert(result, 'int' if both_int else 'double', node)
+        return self.convert(result, integer_type if both_int else 'double', node)
 
     def evaluate(self, node):
         if isinstance(node, ast.Constant):
-            if node.type == 'int':
-                return self.convert(integer_literal(node.value), 'int', node)
+            if node.type == 'string':
+                return self.literal_pointer(node)
+            if node.type in ('int', 'long int'):
+                value = integer_literal(node.value)
+                return self.convert(value, 'long' if node.type == 'long int' or value > 2147483647 else 'int', node)
+            if node.type == 'char':
+                try:
+                    value = literal_ast.literal_eval(node.value)
+                except (ValueError, SyntaxError):
+                    self.fail(node, '不支持此字符转义')
+                if len(value) != 1 or ord(value) > 255:
+                    self.fail(node, 'char 常量需要单个 0–255 字符')
+                return ord(value)
             if node.type in ('float', 'double'):
                 return self.convert(float(node.value.rstrip('fFlL')), 'double', node)
             self.fail(node, '字符串只能作为 printf 的格式文本')
@@ -292,7 +394,7 @@ class Runtime:
             if isinstance(node, ast.ID):
                 cell = self.cell(node.name, node)
                 if isinstance(cell.value, list):
-                    return Pointer(cell.identity, 0, cell.type, node.name)
+                    return Pointer(cell.identity, 0, cell.type, node.name, cell.readonly)
             return self.read(self.reference(node), node)
         if isinstance(node, ast.Assignment):
             ref = self.reference(node.lvalue)
@@ -319,10 +421,11 @@ class Runtime:
                     value, _ = self.evaluate_sources(node.expr.name)
                     offset, _ = self.evaluate_sources(node.expr.subscript)
                     return self.pointer_offset(value, offset, node)
-                name, cell, index = self.reference(node.expr, address=True)
+                ref = self.reference(node.expr, address=True)
+                name, cell, index = ref
                 if cell.type.endswith('*'):
                     self.fail(node, '不支持多级指针')
-                return Pointer(cell.identity, index, cell.type, name)
+                return Pointer(cell.identity, index, cell.type, name, cell.readonly or getattr(ref, 'readonly', False))
             if node.op == '*':
                 return self.read(self.reference(node), node)
             if node.op in ('p++', 'p--', '++', '--'):
@@ -331,14 +434,15 @@ class Runtime:
                 new = self.write(ref, self.binary('+' if '+' in node.op else '-', old, 1, node), node)
                 return old if node.op.startswith('p') else new
             # The signed minimum is a unary-minus expression in the parser.
-            if node.op == '-' and isinstance(node.expr, ast.Constant) and node.expr.type == 'int':
-                return self.convert(-integer_literal(node.expr.value), 'int', node)
+            if node.op == '-' and isinstance(node.expr, ast.Constant) and node.expr.type in ('int', 'long int'):
+                value = -integer_literal(node.expr.value)
+                return self.convert(value, 'long' if node.expr.type == 'long int' or value < -2147483647 else 'int', node)
             value = self.evaluate(node.expr)
             if node.op == '!':
                 return int(not self.truth(value, node))
             if not isinstance(value, (int, float)):
                 self.fail(node, '一元运算需要数值；srand 没有返回值')
-            return self.convert(value if node.op == '+' else -value, 'int' if isinstance(value, int) else 'double', node)
+            return self.convert(value if node.op == '+' else -value, 'long' if isinstance(value, Long) else 'int' if isinstance(value, int) else 'double', node)
         if isinstance(node, ast.ExprList):
             for expr in node.exprs[:-1]:
                 self.evaluate_sources(expr)
@@ -346,7 +450,11 @@ class Runtime:
         if isinstance(node, ast.FuncCall):
             if node.name.name in self.program.functions:
                 return self.call_function(node)
-            return self.printf(node) if node.name.name == 'printf' else self.stdlib(node)
+            if node.name.name in ('printf', 'scanf'):
+                return getattr(formatted_io, node.name.name)(self, node)
+            if node.name.name in standard_library.FUNCTIONS:
+                return standard_library.execute(self, node)
+            return self.stdlib(node)
         self.fail(node, f'此处不能执行 {type(node).__name__}')
 
     def stdlib(self, node):
@@ -366,29 +474,3 @@ class Runtime:
         # A reproducible teaching LCG; RAND_MAX is 32767, not a platform ABI promise.
         self.random_state = (1103515245 * self.random_state + 12345) & 0x7fffffff
         return (self.random_state >> 16) & 32767
-
-    def printf(self, node):
-        args = node.args.exprs if node.args else []
-        if not args or not isinstance(args[0], ast.Constant) or args[0].type != 'string':
-            self.fail(node, 'printf 第一个参数必须为字符串常量')
-        try:
-            fmt = literal_ast.literal_eval(args[0].value)
-        except (ValueError, SyntaxError):
-            self.fail(node, 'printf 字符串转义格式不受支持')
-        tokens = re.findall(r'%(?:%|d|f)|%', fmt)
-        if '%' in tokens:
-            self.fail(node, 'printf 仅支持 %d、%f、%%')
-        specs = [s for s in tokens if s != '%%']
-        if len(specs) != len(args) - 1:
-            self.fail(node, 'printf 格式与参数数量不一致')
-        values = []
-        for spec, expr in zip(specs, args[1:]):
-            value = self.evaluate(expr)
-            if (spec == '%d' and not isinstance(value, int)) or (spec == '%f' and not isinstance(value, float)):
-                self.fail(expr, f'printf {spec} 与参数类型不匹配')
-            values.append(value)
-        rendered = fmt % tuple(values)
-        if len(self.output) + len(rendered) > 100000:
-            self.fail(node, '输出超过 100000 字符上限')
-        self.output += rendered
-        return len(rendered)

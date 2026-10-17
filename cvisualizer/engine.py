@@ -9,6 +9,7 @@ from pycparser import c_ast as ast
 from .language import CError, Location, Program
 from .runtime import Runtime
 from .motion import index_bindings, index_markers, pointer_slots, indirect_index_slots
+from .qualifiers import qualifiers
 
 
 @dataclass
@@ -57,6 +58,7 @@ class Engine:
         from .function_execution import FunctionExecution
         self.functions = FunctionExecution(self)
         self.runtime.call_function = self.functions.call
+        self.runtime.consume = self._consume
         self._detail = deque()
         self._trace, self._calls = [], []
         self._record_detail = False
@@ -96,11 +98,11 @@ class Engine:
 
     def _state(self):
         rt = self.runtime
-        return deepcopy((rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity))
+        return deepcopy((rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool))
 
     def _restore(self, state):
         rt = self.runtime
-        rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity = deepcopy(state)
+        rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool = deepcopy(state)
 
     def _consume(self, location):
         if self._operations >= self.max_steps:
@@ -129,6 +131,7 @@ class Engine:
         if action is None:
             return None
         loc = action.location
+        operations_before = self._operations
         self._consume(loc)
         rt = self.runtime
         backup = self._state()
@@ -142,8 +145,14 @@ class Engine:
             description = action.run()
         except CError:
             self._restore(backup)
+            self._operations = operations_before
             self._trace.clear()
             raise
+        except (MemoryError, OverflowError):
+            self._restore(backup)
+            self._operations = operations_before
+            self._trace.clear()
+            raise CError('可用内存或本机索引范围不足，请缩小数据规模', loc.line, loc.column) from None
         event = Event(loc.line, loc.column, loc.text, loc.kind, str(description),
                       rt.snapshot(), rt.output, list(rt.reads), list(rt.writes), 0, before,
                       list(rt.transfers), list(self._calls), expanded=bool(self._trace))
@@ -237,7 +246,8 @@ class Engine:
             def perform():
                 if isinstance(node, ast.Return) and node.expr:
                     type_name = self.functions.return_type
-                    value = rt.convert(rt.evaluate(node.expr), type_name, node)
+                    const_target = qualifiers(self.functions.stack[-1].node.decl.type.type)[1] if self.functions.stack else False
+                    value = rt.convert(rt.evaluate(node.expr), type_name, node, const_target)
                     returned[0] = value
                     return f'return {value}：' + ('返回调用处' if self.functions.stack else '结束程序')
                 return {'break': 'break：退出本层循环', 'continue': 'continue：进入下一轮',

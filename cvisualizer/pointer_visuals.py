@@ -36,7 +36,7 @@ def address_markers(view, variables, blue_lanes):
                 destinations[key] = (point, name, lane, True, RED, False)
                 targets[key] = box_key
             elif (target_name, address.identity) in view.array_anchors:
-                point = view.array_anchors[target_name, address.identity] + QPointF(0, lane*22-view.array_scroll.value())
+                point = view.array_anchors[target_name, address.identity] + QPointF(0, lane*22+view._draw_offset-view._array_offset())
                 note = '尾后，不可解引用' if index == len(target_cell['value']) else '目标未绘制'
                 destinations[key] = (point, f'{name}（{note}）', 0, False, RED, False)
             sections[key] = 'array'

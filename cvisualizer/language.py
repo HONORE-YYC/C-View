@@ -5,6 +5,8 @@ import re
 from pycparser import c_ast as ast, c_parser, c_generator
 from .errors import CError
 from .preprocessor import Preprocessor
+from .numeric import type_name
+from .qualifiers import qualifiers
 
 
 @dataclass(frozen=True)
@@ -23,7 +25,9 @@ class Function:
     return_type: str
 
 
-_BUILTINS = {'printf', 'abs', 'rand', 'srand'}
+_BUILTINS = {'printf', 'scanf', 'abs', 'labs', 'rand', 'srand', 'atoi', 'atol', 'atof',
+             'strlen', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp',
+             'strchr', 'strrchr', 'strstr'}
 _TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
 _GENERATOR = c_generator.CGenerator()
 
@@ -94,7 +98,7 @@ class Program:
         self._check_recursion(definitions)
 
     def _signature(self, decl, definition):
-        if decl.quals or decl.storage or decl.funcspec:
+        if set(decl.quals) - {'const', 'volatile'} or decl.storage or decl.funcspec:
             self.fail(decl, '函数暂不支持类型修饰符或存储修饰符')
         return_type = self._scalar_type(decl.type.type, allow_void=True)
         params = decl.type.args.params if decl.type.args else []
@@ -118,35 +122,35 @@ class Program:
             if param.name and param.name in names:
                 self.fail(param, f'参数 {param.name} 重复声明')
             names.add(param.name)
-            if param.quals or (isinstance(param, ast.Decl)
+            if (isinstance(param, ast.Decl)
                                and (param.storage or param.funcspec or param.init or param.bitsize)):
                 self.fail(param, '函数参数暂不支持修饰符或初始化')
             type_node = param.type
             array = isinstance(type_node, ast.ArrayDecl)
             if array:
-                if not isinstance(type_node.type, ast.TypeDecl) or type_node.dim_quals:
+                if not isinstance(type_node.type, ast.TypeDecl) or set(type_node.dim_quals) - {'const', 'volatile', 'restrict'}:
                     self.fail(param, '函数参数仅支持一维数组')
                 if type_node.dim is not None:
-                    if not self._constant_integer(type_node.dim):
-                        self.fail(param, '数组参数容量必须为整数常量表达式')
                     self._check(type_node.dim)
                 type_node = type_node.type
             pointer = isinstance(type_node, ast.PtrDecl)
             parameter_type = self._scalar_type(type_node)
-            types.append((parameter_type.rstrip('*'), array or pointer))
-        return params, return_type, (return_type, tuple(types))
+            types.append((parameter_type.rstrip('*'), array or pointer, qualifiers(param.type)[1]))
+        return params, return_type, (return_type, qualifiers(decl.type.type)[1], tuple(types))
 
     def _scalar_type(self, node, allow_void=False):
         if isinstance(node, ast.PtrDecl):
-            if node.quals or not isinstance(node.type, ast.TypeDecl):
+            if set(node.quals) - {'const', 'volatile', 'restrict'} or not isinstance(node.type, ast.TypeDecl):
                 self.fail(node, '仅支持单级数值指针，不支持指针修饰符或多级指针')
             return self._scalar_type(node.type) + '*'
-        supported = ('int', 'float', 'double', 'void') if allow_void else ('int', 'float', 'double')
-        if (not isinstance(node, ast.TypeDecl) or node.quals
+        supported = (['int'], ['float'], ['double'], ['long'], ['long', 'int'], ['int', 'long'], ['char'])
+        if allow_void:
+            supported += (['void'],)
+        if (not isinstance(node, ast.TypeDecl) or set(node.quals) - {'const', 'volatile'}
                 or not isinstance(node.type, ast.IdentifierType)
-                or len(node.type.names) != 1 or node.type.names[0] not in supported):
-            self.fail(node, '函数类型仅支持 int、float、double；void 仅可用于返回类型或空参数列表')
-        return node.type.names[0]
+                or node.type.names not in supported):
+            self.fail(node, '函数类型仅支持 int、long、float、double、char；void 仅可用于返回类型或空参数列表')
+        return type_name(node.type.names)
 
     def _check_recursion(self, definitions):
         # Iterative DFS also handles long acyclic chains without Python recursion.
@@ -192,27 +196,34 @@ class Program:
                    ast.FuncCall, ast.ExprList)
         if not isinstance(node, allowed):
             self.fail(node, f'第一版暂不支持 {type(node).__name__}')
-        if isinstance(node, ast.IdentifierType) and node.names not in (['int'], ['float'], ['double']):
-            self.fail(node, '仅支持 int、float、double 类型')
+        if isinstance(node, ast.IdentifierType) and node.names not in (['int'], ['long'], ['long', 'int'], ['int', 'long'], ['char'], ['float'], ['double']):
+            self.fail(node, '仅支持 int、long、char、float、double 类型')
         if isinstance(node, ast.PtrDecl):
             self._scalar_type(node)
-        if isinstance(node, ast.TypeDecl) and node.quals:
+        if isinstance(node, ast.TypeDecl) and set(node.quals) - {'const', 'volatile'}:
             self.fail(node, '暂不支持类型修饰符')
-        if isinstance(node, ast.Decl) and (node.quals or node.storage or node.funcspec or node.bitsize):
+        if isinstance(node, ast.Decl) and (node.storage or node.funcspec or node.bitsize):
             self.fail(node, '暂不支持类型修饰符、存储修饰符或位域')
         if isinstance(node, ast.Decl) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
             self.fail(node, f'变量名称 {node.name} 与函数名称重复')
+        if isinstance(node, ast.Decl) and isinstance(node.type, ast.ArrayDecl):
+            dim = node.type.dim
+            if dim is None and node.init is None:
+                self.fail(node, '省略数组容量时需要初始化列表或字符串')
+            if dim is not None and not self._constant_integer(dim):
+                if global_scope:
+                    self.fail(node, '全局数组容量需要整数常量表达式')
+                if node.init is not None:
+                    self.fail(node, '运行时容量的数组不能带初始化列表')
         if isinstance(node, ast.ID) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
             self.fail(node, f'函数 {node.name} 只能用于函数调用，不能作为变量使用')
         if isinstance(node, ast.ArrayDecl):
-            if not isinstance(node.type, ast.TypeDecl) or node.dim is None or node.dim_quals:
-                self.fail(node, '仅支持有明确容量的一维数组')
-            if not self._constant_integer(node.dim):
-                self.fail(node, '数组容量必须为整数常量表达式，可使用 #define 宏')
-        if isinstance(node, ast.Constant) and node.type not in ('int', 'float', 'double', 'string'):
+            if not isinstance(node.type, ast.TypeDecl) or node.dim_quals:
+                self.fail(node, '仅支持一维数组；方括号修饰符仅用于函数参数')
+        if isinstance(node, ast.Constant) and node.type not in ('int', 'long int', 'char', 'float', 'double', 'string'):
             self.fail(node, f'暂不支持 {node.type} 常量')
-        if isinstance(node, ast.Constant) and node.type == 'int' and len(node.value) > 32:
-            self.fail(node, '整数字面量过长；第一版仅支持 32 位有符号整数')
+        if isinstance(node, ast.Constant) and node.type in ('int', 'long int') and len(node.value) > 32:
+            self.fail(node, '整数字面量过长；最大支持 64 位有符号 long')
         if isinstance(node, ast.Constant) and node.type in ('float', 'double') and node.value.lower().startswith('0x'):
             self.fail(node, '第一版暂不支持十六进制浮点字面量，请使用十进制')
         if isinstance(node, ast.Assignment) and node.op not in ('=', '+=', '-=', '*=', '/=', '%='):
@@ -256,7 +267,7 @@ class Program:
         if depth > 100:
             return False
         if isinstance(node, ast.Constant):
-            return node.type == 'int'
+            return node.type in ('int', 'long int', 'char')
         if isinstance(node, ast.UnaryOp) and node.op in ('+', '-', '!'):
             return Program._constant_integer(node.expr, depth+1)
         if isinstance(node, ast.BinaryOp):

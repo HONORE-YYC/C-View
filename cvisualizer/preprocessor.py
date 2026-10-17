@@ -149,7 +149,7 @@ class Preprocessor:
 
     def directive(self, text, line):
         token = Token('', line, 1)
-        include = re.fullmatch(r'\s*#\s*include\s*(?:<(stdio\.h|stdlib\.h|cstdlib|stddef\.h)>|"(stdio\.h|stdlib\.h|cstdlib|stddef\.h)")\s*', text)
+        include = re.fullmatch(r'\s*#\s*include\s*(?:<(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring)>|"(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring)")\s*', text)
         if include:
             self.macros.setdefault('NULL', Macro(None, tokenize('0')))
             if (include[1] or include[2]) in ('stdlib.h', 'cstdlib'):
@@ -161,7 +161,7 @@ class Preprocessor:
             return
         define = re.fullmatch(r'\s*#\s*define\s+([A-Za-z_]\w*)(.*)', text, re.DOTALL)
         if not define:
-            self.fail(token, '不支持此预处理指令；支持 stdio.h/stdlib.h/cstdlib、#define 和 #undef')
+            self.fail(token, '不支持此预处理指令；支持 stdio.h/stdlib.h/cstdlib/stddef.h/string.h/cstring、#define 和 #undef')
         name, rest = define[1], define[2]
         parameters = None
         if rest.startswith('('):

@@ -10,6 +10,8 @@ from pycparser import c_ast as ast
 from .runtime import Cell
 from .motion import declaration_key
 from .pointers import Pointer
+from .numeric import type_name
+from .qualifiers import qualifiers
 
 
 class FunctionExecution:
@@ -57,12 +59,13 @@ class FunctionExecution:
             array = isinstance(param.type, ast.ArrayDecl)
             pointer = isinstance(param.type, ast.PtrDecl)
             base = param.type.type if array or pointer else param.type
-            type_name = base.type.names[0]
+            parameter_type = type_name(base.type.names)
             # An array parameter is adjusted to a pointer in C, including local p++.
-            type_name += '*' if pointer or array else ''
+            parameter_type += '*' if pointer or array else ''
             value, sources = rt.evaluate_sources(arg)
-            value = rt.convert(value, type_name, arg)
-            cell = Cell(type_name, value, rt.next_identity, declaration_key(param))
+            readonly, pointee_const = qualifiers(param.type)
+            value = rt.convert(value, parameter_type, arg, pointee_const)
+            cell = Cell(parameter_type, value, rt.next_identity, declaration_key(param), readonly, pointee_const)
             rt.next_identity += 1
             params[param.name] = cell
             inputs.append({'name': param.name, 'expression': engine.program.location(arg).text,
@@ -83,6 +86,12 @@ class FunctionExecution:
         result = None
         returned = False
         try:
+            for param in spec.params:
+                if isinstance(param.type, ast.ArrayDecl) and param.type.dim is not None:
+                    size = rt.evaluate(param.type.dim)
+                    if not isinstance(size, int) or size <= 0:
+                        rt.fail(param, '数组参数容量必须为正整数')
+                    changed.update(rt.write_targets)
             loc = engine.program.location(spec.node.decl, 'function')
             engine.capture_detail(Event(loc.line, loc.column, loc.text, loc.kind,
                 f'进入函数 {spec.name}', self.visible(), rt.output, function=spec.name))

@@ -8,6 +8,7 @@ class Pointer:
     index: int | None
     base_type: str
     name: str
+    readonly: bool = False
 
     def __str__(self):
         if self.identity is None:

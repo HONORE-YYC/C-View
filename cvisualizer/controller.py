@@ -3,12 +3,15 @@ from time import monotonic
 
 from .engine import Engine
 from .language import CError
+from .formatted_io import InputCancelled
 
 
 class Controller:
-    def __init__(self, source, max_steps=100000):
+    def __init__(self, source, max_steps=100000, input_provider=None):
         self.source, self.max_steps = source, max_steps
+        self.input_provider = input_provider
         self.engine = Engine(source, max_steps)
+        self.engine.runtime.input_provider = input_provider
         self.targets = self.engine.program.targets()
         self.state, self.message = 'ready', '准备就绪'
         self.error = None
@@ -19,6 +22,7 @@ class Controller:
 
     def reset(self):
         self.engine = Engine(self.source, self.max_steps)
+        self.engine.runtime.input_provider = self.input_provider
         self.targets = self.engine.program.targets()
         self.state, self.message, self.error = 'ready', '已重置', None
         self._seek_target = None
@@ -63,6 +67,10 @@ class Controller:
         return event
 
     def _fail(self, error):
+        if isinstance(error, InputCancelled):
+            self.error = None
+            self.state, self.message = 'paused', str(error)
+            return
         self.error = error
         self.state, self.message = 'error', str(error)
         self._seek_target = None
