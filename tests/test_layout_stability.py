@@ -44,7 +44,7 @@ def test_return_from_function_restores_both_side_by_side_scroll_positions(app):
     view.resize(600, 600)
     view.show()
     app.processEvents()
-    engine = Engine('int f(int x){return x+1;} int main(){int a[40]={0};' +
+    engine = Engine('int f(int x){return x+1;} int main(){int a[40]={' + ','.join(map(str,range(40))) + '};' +
                     ''.join(f'int v{i}={i};' for i in range(24)) + 'v23=f(v23);}')
     for _ in range(25):
         event = engine.step()
@@ -88,7 +88,7 @@ def test_scalar_scrolling_does_not_move_arrays_and_is_retained(app):
     view = MemoryView()
     view.resize(600, 650)
     view.show()
-    engine = Engine('int a[30]={0};' + ''.join(f'int v{i}={i};' for i in range(24)) + 'v23++;')
+    engine = Engine('int a[30]={' + ','.join(map(str,range(30))) + '};' + ''.join(f'int v{i}={i};' for i in range(24)) + 'v23++;')
     for _ in range(25):
         event = engine.step()
     view.render(engine.runtime.snapshot(), [], event, animate=False)
@@ -171,7 +171,7 @@ def test_array_scroll_keeps_pointer_attached_and_stays_on_next_step(app):
     view = MemoryView()
     view.resize(600, 650)
     view.show()
-    engine = Engine('int a[30]={0}; int i=0; a[i]=1; i=1;')
+    engine = Engine('int a[30]={' + ','.join(map(str,range(30))) + '}; int i=0; a[i]=1; i=1;')
     for _ in range(3):
         event = engine.step()
     view.render(engine.runtime.snapshot(), [], event, pointers=engine.index_markers(), animate=False)

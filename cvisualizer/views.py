@@ -11,6 +11,7 @@ from .animations import MotionLayer
 from .pointers import Pointer
 from .pointer_visuals import address_markers, RED
 from .numeric import Char
+from .array_folding import FoldedArray, Fold
 import math
 
 
@@ -185,6 +186,40 @@ class MemoryView(QGraphicsView):
         item.setPlainText(QFontMetricsF(item.font()).elidedText(text, Qt.TextElideMode.ElideRight, width-14))
         rect.value_label = item
         return rect
+
+    def folded_box(self, name, fold, x, y, width):
+        count = fold.end-fold.start
+        description = f'{count} 个未赋值元素' if fold.value is None else f'{count} 个相同值：{display(fold.value)}'
+        tooltip = f'{name}[{fold.start}..{fold.end-1}] · {description}'
+        label = self.label(description, x, y-33, 9, '#64748b')
+        label.setToolTip(tooltip)
+        label.setPlainText(QFontMetricsF(label.font()).elidedText(description, Qt.TextElideMode.ElideRight, width))
+        bracket_y = self._content_y(y-10)
+        for x1,y1,x2,y2 in ((x+8,bracket_y+6,x+8,bracket_y),
+                             (x+8,bracket_y,x+width-8,bracket_y),
+                             (x+width-8,bracket_y,x+width-8,bracket_y+6)):
+            line = self.scene().addLine(x1,y1,x2,y2,QPen(QColor('#64748b'),1.3))
+            line.setParentItem(self._content_parent)
+            line.setToolTip(tooltip)
+        rect = self.box('',fold.value,x,y,width)
+        rect.value_label.setPlainText('...')
+        rect.value_label.setPos(x+(width-rect.value_label.boundingRect().width())/2,self._content_y(y+7))
+        rect.setToolTip(tooltip)
+        rect.value_label.setToolTip(tooltip)
+
+    def array_layout(self, name, cell, variables, model, event):
+        keep = set(model.markers)
+        if model.kind == 'list':
+            keep.update((len(model.active)-1,len(model.active)))
+        keep.update(index for key,index in self._data[3].items() if key[0] == name and key[1] == cell['identity'])
+        keep.update(c['value'].index or 0 for c in variables.values()
+                    if isinstance(c['value'],Pointer) and c['value'].identity == cell['identity'])
+        if event and event.variables.get(name,{}).get('identity') == cell['identity']:
+            # Whole-array declarations retain compact initialization; individual actions remain visible.
+            whole = (name,None) in event.writes
+            keep.update(index for n,index in event.reads + ([] if whole else event.writes)
+                        if n == name and index is not None)
+        return FoldedArray(model.values,keep)
 
     @staticmethod
     def activity(name, index, cell, event):
@@ -378,21 +413,28 @@ class MemoryView(QGraphicsView):
             pointer_count += self._data[4].get('__pointer_slots__',
                 sum(isinstance(c['value'], Pointer) for c in variables.values()))
             marker_space = 20*max(0, pointer_count-1)
-            y += math.ceil(note.boundingRect().height())+(42 if pointer_count else 12)+marker_space
+            y += math.ceil(note.boundingRect().height())+42+marker_space
             active = model.active
+            layout = self.array_layout(name,cell,variables,model,event)
             vertical = model.kind == 'stack'
             labels_below = not vertical or width < box_width+190
             row_height = ((112 if labels_below else 96) if vertical else 112)+marker_space
             row_columns = 1 if vertical else columns
-            row_count = (len(model.values)+row_columns-1)//row_columns
+            row_count = (len(layout)+row_columns-1)//row_columns
             start_row, end_row = 0, row_count
             if self._array_virtual:
                 start_row = max(0, (self._draw_offset+88-y)//row_height-1)
                 end_row = min(row_count, max(0, (self._draw_offset+height-y+row_height-1)//row_height+1))
-            for pos in range(start_row*row_columns, min(len(model.values), end_row*row_columns)):
-                index = len(model.values)-1-pos if vertical else pos
+            for pos in range(start_row*row_columns, min(len(layout), end_row*row_columns)):
+                index = layout[len(layout)-1-pos if vertical else pos]
                 x = 24 if vertical else 18+(pos % columns)*(box_width+12)
                 cy = y+(pos//row_columns)*row_height
+                if isinstance(index,Fold):
+                    self.folded_box(name,index,x,cy,box_width)
+                    if model.kind != 'array':
+                        self.label('有效' if index.start in active else '空闲位', x+6,
+                                   cy+45,8,'#64748b')
+                    continue
                 read, written = self.activity(name, index, cell, event)
                 self.boxes[name, index, cell['identity']] = self.box(f'{name}[{index}]', model.values[index], x, cy, box_width, read, written)
                 if model.kind != 'array':

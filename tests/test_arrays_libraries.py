@@ -164,7 +164,7 @@ def test_extreme_array_fine_scroll_and_last_element_are_visible(app):
     from PySide6.QtGui import QWheelEvent
     from PySide6.QtCore import QPoint, QPointF, Qt
     for size in (1000000000000, 9223372036854775807):
-        e, _ = run(f'int a[{size}L];a[100]=7;')
+        e, _ = run(f'int a[{size}L];int *p=&a[{size-1}L];')
         v = MemoryView()
         v.resize(650,600)
         v.show()
