@@ -12,6 +12,8 @@ from .pointers import Pointer
 from .numeric import Long, LongLong, Char, type_name
 from .value_format import display
 from . import math_library
+from . import struct_runtime
+from .struct_runtime import StructValue
 from . import formatted_io
 from . import standard_library
 from .arrays import Array, Matrix
@@ -84,6 +86,7 @@ class Runtime:
         visible = {}
         for scope in self.scopes:
             visible.update(scope)
+        visible = struct_runtime.flattened(visible)
         identities = {cell.identity for cell in visible.values()}
         for value in list(visible.values()):
             pointer = value.value
@@ -92,20 +95,19 @@ class Runtime:
                 if target:
                     name, cell = target
                     alias = name if name not in visible else f'{name}@{cell.identity}'
-                    visible[alias] = cell
+                    visible.update(dict(struct_runtime.cells(alias, cell)))
                     identities.add(cell.identity)
         return visible
 
     def snapshot(self):
-        return {name: {'type': cell.type, 'value': deepcopy(cell.value), 'identity': cell.identity,
-                       'declaration': cell.declaration} for name, cell in self.visible_cells().items()}
+        return struct_runtime.snapshot(self, self.visible_cells())
 
     def find_identity(self, identity):
         if identity in self.literals:
             return f'字符串{identity}', self.literals[identity]
         for scopes in [self.scopes] + list(reversed(self.callers)):
             for scope in reversed(scopes):
-                for name, cell in scope.items():
+                for name, cell in struct_runtime.flattened(scope).items():
                     if cell.identity == identity:
                         return name, cell
         return None
@@ -130,6 +132,9 @@ class Runtime:
                 name = alias
                 break
         index = (pointer.row, offset) if pointer.row is not None else offset if isinstance(cell.value, list) else None
+        if isinstance(cell.value, struct_runtime.StructArray) and not address:
+            path, member, _ = struct_runtime.array_member(self, name, cell, offset, node)
+            return Reference(path, member, None, pointer.readonly)
         return Reference(name, cell, index, pointer.readonly)
 
     def pointer_offset(self, pointer, amount, node):
@@ -151,6 +156,10 @@ class Runtime:
         self.fail(node, f'变量 {name} 未声明')
 
     def convert(self, value, type_name, node, pointee_const=False):
+        if type_name.startswith('struct ') and not type_name.endswith('*'):
+            if not isinstance(value, StructValue) or value.type != type_name:
+                self.fail(node, '结构体赋值类型不匹配')
+            return deepcopy(value)
         if type_name == 'bool':
             return self.truth(value, node)
         if type_name.endswith('*'):
@@ -199,6 +208,8 @@ class Runtime:
         return self.record_boolean(node, value, bool(value))
 
     def declare(self, node, global_scope=False):
+        if node.name is None:
+            return '定义结构体类型'
         scope = self.scopes[-1]
         if node.name in scope:
             self.fail(node, f'变量 {node.name} 重复定义')
@@ -212,7 +223,9 @@ class Runtime:
             base = base.type
         if not isinstance(base, ast.TypeDecl):
             self.fail(node, '不支持此声明')
-        declared_type = type_name(base.type.names) + ('*' if pointer else '')
+        declared_type = self.program._scalar_type(base) + ('*' if pointer else '')
+        if declared_type.startswith('struct ') and not declared_type.endswith('*'):
+            return struct_runtime.declare(self, node, global_scope)
         readonly, pointee_const = qualifiers(node.type)
         if matrix:
             return self.declare_matrix(node, base, declared_type, 'const' in base.quals, global_scope)
@@ -315,6 +328,8 @@ class Runtime:
         return f'定义二维数组 {node.name}'
 
     def reference(self, node, address=False):
+        if isinstance(node, ast.StructRef):
+            return struct_runtime.member_ref(self, node, address)
         if isinstance(node, ast.UnaryOp) and node.op == '*':
             pointer, _ = self.evaluate_sources(node.expr)
             return self.pointer_ref(pointer, node, address)
@@ -342,6 +357,10 @@ class Runtime:
         if value is None:
             self.fail(node, f'{name}' + (f'[{index}]' if index is not None else '') + ' 未初始化')
         self.reads.append((name, index))
+        if isinstance(value, StructValue):
+            for path, member in struct_runtime.cells(name, cell):
+                if not isinstance(member.value, StructValue):
+                    self.contribute((path, None, member.identity))
         self.contribute((name, index, cell.identity))
         return value
 
@@ -362,6 +381,8 @@ class Runtime:
         self.check_writable(ref, node)
         if isinstance(cell.value, Matrix) and not isinstance(index, tuple):
             self.fail(node, '数组行不能整体赋值')
+        if isinstance(cell.value, StructValue):
+            return struct_runtime.copy_into(self, ref, value, node, sources)
         converted = self.convert(value, cell.type, node, cell.pointee_const)
         if index is None:
             cell.value = converted
@@ -489,6 +510,14 @@ class Runtime:
             if node.type in ('float', 'double'):
                 return self.convert(float(node.value.rstrip('fFlL')), 'double', node)
             self.fail(node, '字符串只能作为 printf 的格式文本')
+        if isinstance(node, ast.StructRef):
+            if not struct_runtime.is_member_lvalue(node):
+                return struct_runtime.temporary_member(self, node)
+            ref = self.reference(node)
+            if isinstance(ref[1].value, list):
+                base_type = f'{ref[1].type}[{ref[1].value.columns}]' if isinstance(ref[1].value, Matrix) else ref[1].type
+                return Pointer(ref[1].identity, 0, base_type, ref[0], ref[1].readonly or getattr(ref, 'readonly', False))
+            return self.read(ref, node)
         if isinstance(node, (ast.ID, ast.ArrayRef)):
             if isinstance(node, ast.ID):
                 cell = self.cell(node.name, node)

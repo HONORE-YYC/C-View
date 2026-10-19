@@ -19,6 +19,23 @@ def address_markers(view, variables, blue_lanes):
         if target is None:
             continue
         target_name, target_cell = target
+        # Aggregate instances are represented by their member cards, so anchor
+        # a structure pointer to its first visible member instead of a hidden root.
+        if target_cell.get('is_struct'):
+            is_array = isinstance(target_cell['value'], list)
+            if not is_array and address.index not in (None, 0):
+                continue
+            prefix = target_name + (f'[{address.index or 0}]' if is_array else '') + '.'
+            member_key = next((box_key for box_key in view.boxes
+                               if box_key[0].startswith(prefix) and view._visible_box(box_key)), None)
+            if member_key is None:
+                continue
+            target_name, member_index, member_identity = member_key
+            target_cell = variables[target_name]
+            from dataclasses import replace
+            address = replace(address, identity=member_identity,
+                              index=member_index[1] if isinstance(member_index, tuple) else member_index,
+                              row=member_index[0] if isinstance(member_index, tuple) else None)
         array = isinstance(target_cell['value'], list)
         index = address.index if array else None
         matrix = hasattr(target_cell['value'], 'columns')

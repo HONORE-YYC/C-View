@@ -29,7 +29,7 @@ def test_array_and_pointer_parameter_declarations_are_compatible(prototype, defi
 
 @pytest.mark.parametrize('declaration', [
     'int **p;', 'void *p;', 'int *p[2];', 'int (*p)[2];', 'int (*p)(int);',
-    'restrict int *p;', 'int *static p;', 'struct A {int x;};', 'typedef int number;',
+    'restrict int *p;', 'int *static p;', 'union A {int x;};', 'typedef int (*callback)(int);',
 ])
 def test_unsupported_pointer_shapes_and_types_are_rejected(declaration):
     with pytest.raises(CError):

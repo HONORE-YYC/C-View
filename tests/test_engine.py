@@ -79,7 +79,7 @@ def test_runtime_errors(code, match):
 
 
 @pytest.mark.parametrize('code', [
-    'int **p;', 'struct A {int x;};', 'int a[2][2][2];',
+    'int **p;', 'union A {int x;};', 'int a[2][2][2];',
     '#include <unknown.h>\nint x=1;',
     'int x=0; unknown_input("%d", &x);', 'break;', 'int a=1; a <<= 2;',
 ])
@@ -120,7 +120,7 @@ def test_signed_minimum_and_float_approximation_are_explicit():
     assert values(events[-1]) == {'x': -2147483648, 'y': 1.5, 'z': 2.5}
 
 
-@pytest.mark.parametrize('source', ['struct A {int x;} main(void){return 0;}',
+@pytest.mark.parametrize('source', ['union A {int x;} main(void){return 0;}',
                                    'enum A {X} main(void){return X;}'])
 def test_non_numeric_main_return_type_is_rejected(source):
     with pytest.raises(CError):

@@ -8,3 +8,5 @@ def frame(items, progress):
         item.setPos(item.matrix_origin + item.matrix_delta*amount)
         item.setZValue(3 if amount else -.5)
         item.value_label.setVisible(amount > .05)
+        if hasattr(item, 'owner_label'):
+            item.owner_label.setVisible(amount > .05)

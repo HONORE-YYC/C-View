@@ -36,6 +36,8 @@ class MemoryView(QGraphicsView):
         self.matrix_stacks, self.matrix_reveals = {}, []
         self.array_anchors = {}
         self.function_boxes = {}
+        self.structure_boxes = {}
+        self._structure_names = ()
         self._context = ''
         self._view_offsets = {}
         self._restoring_offsets = None
@@ -166,7 +168,7 @@ class MemoryView(QGraphicsView):
         item.setPos(x, self._content_y(y))
         return item
 
-    def box(self, name, value, x, y, width, read=False, written=False, purple=False, compact=False):
+    def box(self, name, value, x, y, width, read=False, written=False, purple=False, compact=False, owner=None):
         fill = '#e5e7eb' if value is None else '#dcfce7'
         border = '#a1a8b3' if value is None else '#86bda4'
         if purple or self._function_context:
@@ -175,7 +177,7 @@ class MemoryView(QGraphicsView):
             border = '#60a5fa'
         if written:
             border = '#f59e0b'
-        rect = self.scene().addRect(x, self._content_y(y), width, 36 if compact else 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(neutral_color(fill)))
+        rect = self.scene().addRect(x, self._content_y(y), width, 36 if compact and not owner else 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(neutral_color(fill)))
         rect.setParentItem(self._content_parent)
         track_color(rect, "brush", fill)
         rect.setData(0, name)
@@ -186,9 +188,17 @@ class MemoryView(QGraphicsView):
         item.setToolTip(rect.toolTip())
         item.setPlainText(QFontMetricsF(item.font()).elidedText(text, Qt.TextElideMode.ElideRight, width-14))
         rect.value_label = item
+        if owner:
+            item.setPos(x+6, self._content_y(y+17))
+            badge = self.label(owner, x+6, y-1, 7, '#dc2626')
+            badge.setParentItem(rect)
+            badge.setToolTip(owner)
+            badge.setPlainText(QFontMetricsF(badge.font()).elidedText(owner, Qt.TextElideMode.ElideRight, width-14))
+            rect.owner_label = badge
+            rect.setToolTip(f'{owner} · {rect.toolTip()}')
         return rect
 
-    def folded_box(self, name, fold, x, y, width, matrix_columns=None):
+    def folded_box(self, name, fold, x, y, width, matrix_columns=None, owner=None):
         count = fold.end-fold.start
         description = f'{count} 个未赋值元素' if fold.value is None else f'{count} 个相同值：{display(fold.value)}'
         if matrix_columns is not None:
@@ -205,9 +215,9 @@ class MemoryView(QGraphicsView):
             line = self.scene().addLine(x1,y1,x2,y2,QPen(QColor('#64748b'),1.3))
             line.setParentItem(self._content_parent)
             line.setToolTip(tooltip)
-        rect = self.box('',fold.value,x,y,width)
+        rect = self.box('',fold.value,x,y,width,owner=owner)
         rect.value_label.setPlainText('...')
-        rect.value_label.setPos(x+(width-rect.value_label.boundingRect().width())/2,self._content_y(y+7))
+        rect.value_label.setPos(x+(width-rect.value_label.boundingRect().width())/2,self._content_y(y+(17 if owner else 7)))
         rect.setToolTip(tooltip)
         rect.value_label.setToolTip(tooltip)
 
@@ -233,7 +243,10 @@ class MemoryView(QGraphicsView):
         return ((name, index) in event.reads,
                 (name, index) in event.writes or (name, None) in event.writes)
 
-    def render(self, variables, bindings, event=None, pointers=None, index_lanes=None, functions=(), duration=600, animate=True, force=False):
+    def render(self, variables, bindings, event=None, pointers=None, index_lanes=None, functions=(), duration=600, animate=True, force=False, structures=None):
+        if structures is not None and tuple(structures) != self._structure_names:
+            self._structure_names = tuple(structures)
+            force = True
         pointers = pointers or {}
         data = (variables, list(bindings), event, pointers, index_lanes or {}, tuple(functions))
         if self._rendering:
@@ -251,7 +264,7 @@ class MemoryView(QGraphicsView):
             self._view_offsets.clear()
             self._restoring_offsets = (0, 0)
         self._function_context = bool(context)
-        self._array_virtual = any(isinstance(c['value'], list) and len(c['value']) > 64 for c in variables.values())
+        self._array_virtual = any(isinstance(c['value'], list) and not c.get('is_struct') and len(c['value']) > 64 for c in variables.values())
         self._draw_offset = self._restoring_offsets[1] if self._restoring_offsets is not None else self._array_offset()
         previous = {key: QPointF(item.pos()) for key, item in self.motion.pointers.items()}
         was_busy = self.motion.busy
@@ -262,6 +275,7 @@ class MemoryView(QGraphicsView):
         try:
             self.motion.clear()
             self.boxes, self.array_anchors, self.function_boxes = {}, {}, {}
+            self.structure_boxes = {}
             self.matrix_stacks, self.matrix_reveals = {}, []
             self._draw(variables, bindings, event)
             transfers = []
@@ -389,23 +403,32 @@ class MemoryView(QGraphicsView):
                 info.setToolTip(info.toPlainText())
                 info.setPlainText(QFontMetricsF(info.font()).elidedText(info.toPlainText(), Qt.TextElideMode.ElideRight, full_width-32))
         self.label('数组与数据结构', 16, 58, 10, '#0f172a', True)
-        heading = self.label(f'{self._context} / 局部变量' if self._context else '变量与函数', rail_left+6, 58, 10, '#0f172a', True)
+        heading = self.label(f'{self._context} / 局部变量' if self._context else '结构体、函数与变量', rail_left+6, 58, 10, '#0f172a', True)
         heading.setToolTip(heading.toPlainText())
         heading.setPlainText(QFontMetricsF(heading.font()).elidedText(heading.toPlainText(), Qt.TextElideMode.ElideRight, rail_width-12))
         self._begin_section('scalar', 88, height, rail_width, rail_left)
         y = 100
-        scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list)]
+        scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list) and not cell.get('is_struct')]
         functions = () if self._function_context else self._data[5]
-        entries = [('function', name, None) for name in functions] + [('variable', name, cell) for name, cell in scalars]
+        entries = ([('structure', name, None) for name in self._structure_names]
+                   + [('function', name, None) for name in functions]
+                   + [('variable', name, cell) for name, cell in scalars])
         if entries:
             for pos, (kind, name, cell) in enumerate(entries):
                 x = rail_left+8
                 row_y = y+pos*54
+                if kind == 'structure':
+                    box = self.box(name, None, x, row_y, rail_width-16, compact=True)
+                    box.setBrush(QBrush(QColor('#fee2e2')))
+                    track_color(box, 'brush', '#fee2e2')
+                    box.setPen(QPen(QColor('#dc2626'), 1.6))
+                    self.structure_boxes[name] = box
+                    continue
                 if kind == 'function':
                     self.function_boxes[name] = self.box(name+'()', None, x, row_y, rail_width-16, purple=True, compact=True)
                     continue
                 read, written = self.activity(name, None, cell, event)
-                self.boxes[name, None, cell['identity']] = self.box(name, cell['value'], x, row_y, rail_width-16, read, written, compact=True)
+                self.boxes[name, None, cell['identity']] = self.box(name, cell['value'], x, row_y, rail_width-16, read, written, compact=True, owner=cell.get('struct_owner'))
             y += len(entries)*54
         else:
             self.label('尚无标量变量', rail_left+6, y, 9, '#64748b')
@@ -414,11 +437,11 @@ class MemoryView(QGraphicsView):
         self._begin_section('array', 88, height, width)
         y = 100
         bound = {b.array: b for b in bindings}
-        if not any(isinstance(cell['value'], list) for cell in variables.values()):
+        if not any(isinstance(cell['value'], list) and not cell.get('is_struct') for cell in variables.values()):
             hint = self.label('声明数组后，在这里观察数组与数据结构。\n变量和函数显示在右侧。', 18, y, 10, '#64748b')
             hint.setTextWidth(max(80, width-36))
         for name, cell in variables.items():
-            if not isinstance(cell['value'], list):
+            if not isinstance(cell['value'], list) or cell.get('is_struct'):
                 continue
             model = describe(bound.get(name, Binding(name)), variables)
             self.label(f'{name}  /  {KINDS[model.kind]}', 16, y, 13, '#0f172a', True)
@@ -455,7 +478,7 @@ class MemoryView(QGraphicsView):
                 x = 24 if vertical else 18+(pos % columns)*(box_width+12)
                 cy = y+(pos//row_columns)*row_height
                 if isinstance(index,Fold):
-                    self.folded_box(name,index,x,cy,box_width, cell['value'].columns if matrix else None)
+                    self.folded_box(name,index,x,cy,box_width, cell['value'].columns if matrix else None, owner=cell.get('struct_owner'))
                     if model.kind != 'array':
                         self.label('有效' if index.start in active else '空闲位', x+6,
                                    cy+45,8,'#64748b')
@@ -464,7 +487,7 @@ class MemoryView(QGraphicsView):
                     draw_row(self, name, index, cell, event, x, cy, box_width)
                     continue
                 read, written = self.activity(name, index, cell, event)
-                self.boxes[name, index, cell['identity']] = self.box(f'{name}[{index}]', model.values[index], x, cy, box_width, read, written)
+                self.boxes[name, index, cell['identity']] = self.box(f'{name}[{index}]', model.values[index], x, cy, box_width, read, written, owner=cell.get('struct_owner'))
                 if model.kind != 'array':
                     self.label('有效' if index in active else '空闲位', x+6 if labels_below else x+box_width+14,
                                cy+45 if labels_below else cy+11, 8, '#64748b')

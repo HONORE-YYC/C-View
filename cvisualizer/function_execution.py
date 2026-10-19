@@ -12,6 +12,8 @@ from .motion import declaration_key
 from .pointers import Pointer
 from .numeric import type_name
 from .qualifiers import qualifiers
+from . import struct_runtime
+from .struct_runtime import StructValue
 
 
 class FunctionExecution:
@@ -41,9 +43,12 @@ class FunctionExecution:
         used = self._used[self.stack[-1].name]
         local = set().union(*(set(scope) for scope in rt.scopes[1:]))
         addresses = {cell['value'].identity for name, cell in visible.items()
-                     if (name in local or name in used) and isinstance(cell['value'], Pointer)}
+                     if (name in local or name in used or name.split('.',1)[0].split('[',1)[0] in local | used)
+                     and isinstance(cell['value'], Pointer)}
+        target_names = {name for name, cell in visible.items() if cell['identity'] in addresses}
         return {name: cell for name, cell in visible.items()
-                if name in local or name in used or cell['identity'] in addresses}
+                if name in local or name in used or name.split('.',1)[0].split('[',1)[0] in local | used
+                or cell['identity'] in addresses or any(name.startswith(target+'.') or name.startswith(target+'[') for target in target_names)}
 
     def call(self, node):
         from .engine import Event, _Flow
@@ -63,7 +68,7 @@ class FunctionExecution:
             columns_node = base.dim if matrix else None
             if matrix:
                 base = base.type
-            parameter_type = type_name(base.type.names)
+            parameter_type = rt.program._scalar_type(base)
             if matrix:
                 saved_scopes = rt.scopes
                 rt.scopes = [saved_scopes[0], params]
@@ -79,6 +84,9 @@ class FunctionExecution:
             value = rt.convert(value, parameter_type, arg, pointee_const)
             cell = Cell(parameter_type, value, rt.next_identity, declaration_key(param), readonly, pointee_const)
             rt.next_identity += 1
+            if isinstance(value, StructValue):
+                cell = struct_runtime.make_cell(rt, param)
+                struct_runtime.copy_into(rt, (param.name, cell, None), value, arg, sources, initial=True)
             params[param.name] = cell
             inputs.append({'name': param.name, 'expression': engine.program.location(arg).text,
                            'value': deepcopy(value), 'sources': sources})

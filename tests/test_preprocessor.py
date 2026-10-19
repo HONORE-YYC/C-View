@@ -46,7 +46,12 @@ def test_macro_expansion_keeps_later_statement_original_column_for_seek():
     target = next(t for t in c.targets if t.text == 'x++')
     assert target.column == source.splitlines()[1].index('x++') + 1
     c.seek(target)
-    c.tick()
+    # Seeking deliberately yields after its UI time slice. A busy machine may
+    # need another tick even for this short program.
+    for _ in range(3):
+        c.tick()
+        if c.state != 'seeking':
+            break
     assert c.state == 'paused'
     assert c.engine.runtime.snapshot()['x']['value'] == 123456789
 

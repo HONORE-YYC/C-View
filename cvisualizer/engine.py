@@ -9,6 +9,7 @@ from pycparser import c_ast as ast
 from .language import CError, Location, Program
 from .runtime import Runtime
 from .motion import index_bindings, index_markers, pointer_slots, indirect_index_slots
+from .member_motion import member_index_bindings, member_index_markers
 from .qualifiers import qualifiers
 from .value_format import display
 
@@ -67,6 +68,7 @@ class Engine:
         self._operations = 0
         self._index_bindings = index_bindings(self.program)
         self._matrix_index_bindings = index_bindings(self.program, matrices=True)
+        self._member_index_bindings = member_index_bindings(self.program)
         self.index_lanes = {}
         for array, _ in self._index_bindings:
             self.index_lanes[array] = self.index_lanes.get(array, 0) + 1
@@ -74,6 +76,7 @@ class Engine:
             self.index_lanes[array] = self.index_lanes.get(array, 0) + 1
         self.index_lanes['__pointer_slots__'] = pointer_slots(self.program)
         self.index_lanes['__indirect_index_slots__'] = indirect_index_slots(self.program, self._index_bindings) + len(self._matrix_index_bindings)
+        self.index_lanes['__indirect_index_slots__'] += max((len(axes) for _, axes in self._member_index_bindings), default=0)
         self.max_steps, self.count = max_steps, 0
         self.last = None
         self._pending = None
@@ -81,7 +84,9 @@ class Engine:
         self._iterator = self._program()
 
     def index_markers(self):
-        return index_markers(self._index_bindings, self.runtime.snapshot(), self._matrix_index_bindings)
+        snapshot = self.runtime.snapshot()
+        return {**index_markers(self._index_bindings, snapshot, self._matrix_index_bindings),
+                **member_index_markers(self._member_index_bindings, snapshot)}
 
     def peek(self):
         if self._detail:

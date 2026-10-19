@@ -53,8 +53,10 @@ def draw_row(view, name, row, cell, event, x, y, width):
     rear = []
     for slot in reversed(range(count)):
         read, written = view.activity(name, (row, slot), cell, event)
-        card = view.box('', matrix[row][slot], x+5*(slot+1), y-7*(slot+1), width, read, written)
+        card = view.box('', matrix[row][slot], x+5*(slot+1), y-7*(slot+1), width, read, written, owner=cell.get('struct_owner'))
         card.value_label.setVisible(False)
+        if hasattr(card, 'owner_label'):
+            card.owner_label.setVisible(False)
         card.setZValue(-2-slot)
         card.setData(0, None)
         card.setToolTip(f'{name}[{row}] · {matrix.columns} 列')
@@ -62,7 +64,7 @@ def draw_row(view, name, row, cell, event, x, y, width):
     view.matrix_stacks[key] = rear
     initialized = row_summary(matrix[row]) is not None
     read, written = view.activity(name, row, cell, event)
-    front = view.box(index_label(name, row), 0 if initialized else None, x, y, width, read, written)
+    front = view.box(index_label(name, row), 0 if initialized else None, x, y, width, read, written, owner=cell.get('struct_owner'))
     front.value_label.setPlainText(index_label(name, row))
     front.setToolTip(f'{name}[{row}] · {matrix.columns} 列')
     front.value_label.setToolTip(front.toolTip())
@@ -80,12 +82,14 @@ def draw_row(view, name, row, cell, event, x, y, width):
         # The actual column label remains precise even when the representative stack is compressed.
         slot = min(column, count-1)
         card = view.box(index_label(name, (row, column)), matrix[row][column],
-                        x+5*(slot+1), y-7*(slot+1), width, read, written)
+                        x+5*(slot+1), y-7*(slot+1), width, read, written, owner=cell.get('struct_owner'))
         card.value_label.setParentItem(card)
         card.matrix_origin = QPointF(card.pos())
         card.matrix_delta = QPointF(-5*(slot+1), 7*(slot+1)+64+lane*48)
         card.setZValue(-.5)
         card.value_label.setVisible(False)
+        if hasattr(card, 'owner_label'):
+            card.owner_label.setVisible(False)
         view.matrix_reveals.append(card)
         view.boxes[name, (row, column), cell['identity']] = card
 

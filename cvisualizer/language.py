@@ -6,6 +6,7 @@ from pycparser import c_ast as ast, c_parser, c_generator
 from .errors import CError
 from .preprocessor import Preprocessor
 from .numeric import type_name
+from .type_registry import TypeRegistry
 from .math_library import FUNCTIONS as MATH_FUNCTIONS
 from .qualifiers import qualifiers
 
@@ -52,6 +53,9 @@ class Program:
             line, column = self.preprocessed.original(max(1, int(match[1])-self.offset), int(match[2])) if match else (0, 0)
             detail = str(exc).split(': ', 1)[-1]
             raise CError(f'C 语法错误：{detail}', line, column) from None
+        self.type_registry = TypeRegistry(self).normalize(self.tree)
+        self.structs = self.type_registry.structs
+        self.structure_names = self.type_registry.names
         self.globals = []
         self.main = None
         self.functions = {}
@@ -97,6 +101,10 @@ class Program:
                 if param.name in definitions or param.name in _BUILTINS:
                     self.fail(param, f'参数名称 {param.name} 与函数名称重复')
             self._check(function.node.body, function=function)
+        self._field_ids = {id(field) for spec in self.structs.values() for field in spec.fields or []}
+        for spec in self.structs.values():
+            for field in spec.fields or []:
+                self._check(field, global_scope=True)
         self._check_recursion(definitions)
 
     def _signature(self, decl, definition):
@@ -155,6 +163,10 @@ class Program:
             if set(node.quals) - {'const', 'volatile', 'restrict'} or not isinstance(node.type, ast.TypeDecl):
                 self.fail(node, '仅支持单级数值指针，不支持指针修饰符或多级指针')
             return self._scalar_type(node.type) + '*'
+        if isinstance(node, ast.TypeDecl) and isinstance(node.type, ast.Struct):
+            if set(node.quals) - {'const', 'volatile'}:
+                self.fail(node, '暂不支持类型修饰符')
+            return 'struct ' + node.type.name
         supported = (['int'], ['float'], ['double'], ['long'], ['long', 'int'], ['int', 'long'], ['char'], ['_Bool'], ['long', 'long'], ['long', 'long', 'int'])
         if allow_void:
             supported += (['void'],)
@@ -188,7 +200,8 @@ class Program:
     def location(self, node, kind='statement'):
         coord = node.coord
         line, column = self.preprocessed.original(max(1, coord.line-self.offset), coord.column) if coord else (1, 1)
-        return Location(line, column, _GENERATOR.visit(node), kind)
+        text = self.type_registry.original.get(id(node))
+        return Location(line, column, text if text is not None else _GENERATOR.visit(node), kind)
 
     def fail(self, node, message):
         # Reporting invalid/deep ASTs must not regenerate the invalid subtree.
@@ -203,13 +216,22 @@ class Program:
             self.fail(node, '表达式或代码块嵌套过深（最多 100 层）')
         allowed = (ast.Compound, ast.Decl, ast.TypeDecl, ast.IdentifierType, ast.ArrayDecl, ast.PtrDecl,
                    ast.InitList, ast.Constant, ast.ID, ast.Assignment, ast.BinaryOp,
-                   ast.UnaryOp, ast.ArrayRef, ast.If, ast.For, ast.While, ast.Break,
+                   ast.UnaryOp, ast.ArrayRef, ast.Struct, ast.StructRef, ast.If, ast.For, ast.While, ast.Break,
                    ast.Continue, ast.Return, ast.EmptyStatement, ast.DeclList,
                    ast.FuncCall, ast.ExprList, ast.Cast, ast.Typename)
         if not isinstance(node, allowed):
             self.fail(node, f'第一版暂不支持 {type(node).__name__}')
         if isinstance(node, ast.IdentifierType) and node.names not in (['int'], ['long'], ['long', 'int'], ['int', 'long'], ['char'], ['float'], ['double'], ['_Bool'], ['long', 'long'], ['long', 'long', 'int']):
             self.fail(node, '仅支持 int、long、char、float、double 类型')
+        if isinstance(node, ast.Struct):
+            return
+        if isinstance(node, ast.StructRef):
+            self._check(node.name, loops, depth + 1, function, global_scope)
+            return
+        if isinstance(node, ast.Decl) and node.name is None:
+            return
+        if isinstance(node, ast.Decl):
+            self.type_registry.complete_object(node.type, node)
         if isinstance(node, ast.Cast):
             self._scalar_type(node.to_type.type)
         if isinstance(node, ast.PtrDecl):
@@ -218,7 +240,7 @@ class Program:
             self.fail(node, '暂不支持类型修饰符')
         if isinstance(node, ast.Decl) and (node.storage or node.funcspec or node.bitsize):
             self.fail(node, '暂不支持类型修饰符、存储修饰符或位域')
-        if isinstance(node, ast.Decl) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
+        if isinstance(node, ast.Decl) and id(node) not in getattr(self, '_field_ids', set()) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
             self.fail(node, f'变量名称 {node.name} 与函数名称重复')
         if isinstance(node, ast.Decl) and isinstance(node.type, ast.ArrayDecl):
             current, dimensions = node.type, []

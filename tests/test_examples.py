@@ -21,6 +21,7 @@ EXAMPLES = EXAMPLE_DIRECTORY
     ('mixed.c', {'length': 4, 'top': 1, 'front': 1, 'rear': 4, 'popped': 6, 'first': 2}),
     ('loops_arrays.c', {'sum': 8, 'count': 0, 'i': 4, 'j': 1, 'a': [2, 4, 4, 2]}),
     ('matrices.c', {'total': 27, 'a': [[2, 3, 4], [5, 6, 3]], 'wide': [[0]*8, [0]*7+[3]]}),
+    ('structs.c', {'popped': 20, 's.top': 0, 's.data': [10, 20, 0, 0, 0], 'copy.data': [99, 20, 0, 0, 0]}),
     ('functions.c', {'source': 3, 'answer': 6, 'numbers': [7, 8, 9, 10], 'total': 34}),
     ('pointers.c', {'x': 7, 'values': [2, 17, 4, 5]}),
     ('input.c', {'count': 8000000000, 'price': 2.5, 'grade': 65, 'matched': 4}),
@@ -62,5 +63,6 @@ def test_catalog_lists_every_editable_example_once_in_learning_order():
     assert names.index('loops_arrays.c') < names.index('functions.c')
     assert names.index('loops_arrays.c') < names.index('matrices.c') < names.index('functions.c')
     assert names.index('functions.c') < names.index('pointers.c')
+    assert names.index('pointers.c') < names.index('structs.c')
     assert names.index('large_arrays.c') < names.index('list.c')
     assert names[-1] == 'mixed.c'

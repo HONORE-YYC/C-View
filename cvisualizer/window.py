@@ -216,7 +216,7 @@ class MainWindow(QMainWindow):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         root.addWidget(self.status)
-        footer = QLabel('教学子集：变量、数组、单级指针、循环、非递归函数、宏和常用标准库。暂不支持结构体、动态内存和递归。')
+        footer = QLabel('教学子集：变量、数组、typedef、结构体、单级指针、循环、非递归函数和常用标准库。暂不支持动态内存和递归。')
         footer.setObjectName('muted')
         footer.setWordWrap(True)
         root.addWidget(footer)
@@ -273,7 +273,7 @@ class MainWindow(QMainWindow):
         self.targets.clear()
         self.log.clear()
         self.output.clear()
-        self.visuals.render({}, self.bindings, functions=self.function_names())
+        self.visuals.render({}, self.bindings, functions=self.function_names(), structures=self.structure_names())
         self.step_label.setText('STEP 0000')
         self.explanation.setText('点击「完整演示」或「单步」开始。')
         self.next_label.setText('尚未开始')
@@ -313,6 +313,9 @@ class MainWindow(QMainWindow):
     def function_names(self):
         return tuple(self._preview_program.functions) if self._preview_program else ()
 
+    def structure_names(self):
+        return tuple(self._preview_program.structure_names) if self._preview_program else ()
+
     def update_code_map(self):
         try:
             self._preview_program = self.controller.engine.program if self.controller else Program(self.editor.toPlainText())
@@ -321,7 +324,7 @@ class MainWindow(QMainWindow):
         targets = self._preview_program.targets() if self._preview_program else []
         self.editor.set_playable_lines(loc.line for loc in targets)
         if not self.controller:
-            self.visuals.render({}, self.bindings, functions=self.function_names())
+            self.visuals.render({}, self.bindings, functions=self.function_names(), structures=self.structure_names())
 
     def play_line(self, line):
         if self.visuals.motion.busy or (self.controller and self.controller.state in ('running', 'seeking')):
@@ -352,7 +355,7 @@ class MainWindow(QMainWindow):
 
     def prepare_restart(self):
         if self.controller and self.controller.state in ('finished', 'stopped', 'error'):
-            self.visuals.render({}, self.bindings, functions=self.function_names())
+            self.visuals.render({}, self.bindings, functions=self.function_names(), structures=self.structure_names())
             self.log.clear()
             self.output.clear()
 
@@ -455,6 +458,7 @@ class MainWindow(QMainWindow):
         self.visuals.render(snapshot, self.bindings, event, pointers=c.engine.index_markers(),
                             index_lanes=c.engine.index_lanes,
                             functions=self.function_names(),
+                            structures=self.structure_names(),
                             duration=max(320, min(1100, int(self.speed.value()*.85))), animate=animate)
         if self.visuals.motion.busy:
             self.editor.set_play_enabled(False)
