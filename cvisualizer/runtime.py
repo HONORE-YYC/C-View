@@ -9,10 +9,12 @@ from pycparser import c_ast as ast
 from .language import CError
 from .motion import declaration_key
 from .pointers import Pointer
-from .numeric import Long, Char, type_name
+from .numeric import Long, LongLong, Char, type_name
+from .value_format import display
+from . import math_library
 from . import formatted_io
 from . import standard_library
-from .arrays import Array
+from .arrays import Array, Matrix
 from .qualifiers import qualifiers
 from dataclasses import replace
 import sys
@@ -72,6 +74,7 @@ class Runtime:
         self.literals = {}
         self.literal_pool = {}
         self.consume = None
+        self.booleans = []
 
     def fail(self, node, message):
         self.program.fail(node, message)
@@ -117,14 +120,16 @@ class Runtime:
             self.fail(node, '悬空指针：目标对象已离开作用域')
         name, cell = target
         offset = pointer.index if pointer.index is not None else 0
-        size = len(cell.value) if isinstance(cell.value, list) else 1
+        size = cell.value.columns if isinstance(cell.value, Matrix) and pointer.row is not None else len(cell.value) if isinstance(cell.value, list) else 1
+        if pointer.row is not None and (not isinstance(cell.value, Matrix) or not 0 <= pointer.row < len(cell.value)):
+            self.fail(node, '数组行下标越界')
         if not 0 <= offset <= size or (not address and offset == size):
             self.fail(node, '指针越界：不能访问对象范围外或尾后位置')
         for alias, value in self.visible_cells().items():
             if value.identity == cell.identity:
                 name = alias
                 break
-        index = offset if isinstance(cell.value, list) else None
+        index = (pointer.row, offset) if pointer.row is not None else offset if isinstance(cell.value, list) else None
         return Reference(name, cell, index, pointer.readonly)
 
     def pointer_offset(self, pointer, amount, node):
@@ -133,11 +138,11 @@ class Runtime:
             self.fail(node, '指针偏移必须是整数')
         target = self.find_identity(pointer.identity)[1]
         index = (pointer.index or 0) + amount
-        size = len(target.value) if isinstance(target.value, list) else 1
+        size = target.value.columns if isinstance(target.value, Matrix) and pointer.row is not None else len(target.value) if isinstance(target.value, list) else 1
         if not 0 <= index <= size:
             self.fail(node, '指针偏移越界')
         return Pointer(pointer.identity, index if isinstance(target.value, list) or index else None,
-                       pointer.base_type, pointer.name, pointer.readonly)
+                       pointer.base_type, pointer.name, pointer.readonly, pointer.row)
 
     def cell(self, name, node):
         for scope in reversed(self.scopes):
@@ -146,6 +151,8 @@ class Runtime:
         self.fail(node, f'变量 {name} 未声明')
 
     def convert(self, value, type_name, node, pointee_const=False):
+        if type_name == 'bool':
+            return self.truth(value, node)
         if type_name.endswith('*'):
             if isinstance(value, int) and value == 0:
                 return Pointer(None, None, type_name[:-1], '')
@@ -158,22 +165,38 @@ class Runtime:
             self.fail(node, '需要数值，不能使用整个数组或字符串参与运算')
         if isinstance(value, float) and not math.isfinite(value):
             self.fail(node, '浮点数溢出或不是有限数值')
-        if type_name in ('int', 'long', 'char'):
+        if type_name in ('int', 'long', 'long long', 'char'):
             result = int(value)
             if type_name == 'char':
                 return Char(result % 256)
-            bits = 64 if type_name == 'long' else 32
+            bits = 64 if type_name in ('long', 'long long') else 32
             if not -(2 ** (bits-1)) <= result < 2 ** (bits-1):
                 self.fail(node, f'{bits} 位有符号整数溢出')
-            return Long(result) if type_name == 'long' else result
+            return LongLong(result) if type_name == 'long long' else Long(result) if type_name == 'long' else result
         return float(value)
+
+    def record_boolean(self, node, value, result, operands=None):
+        expression = self.program.location(node).text
+        # Parser coordinates also distinguish separate expansions of one macro.
+        position = (node.coord.line, node.coord.column) if node.coord else None
+        record = {'expression': expression, 'value': value, 'result': bool(result),
+                  'position': position}
+        if operands is not None:
+            record['operands'] = operands
+        if (self.booleans and self.booleans[-1]['position'] == position
+                and self.booleans[-1]['expression'] == expression
+                and self.booleans[-1]['value'] == value and self.booleans[-1]['result'] == bool(result)):
+            return bool(result)
+        if len(self.booleans) < 16:
+            self.booleans.append(record)
+        return bool(result)
 
     def truth(self, value, node):
         if isinstance(value, Pointer):
-            return value.identity is not None
+            return self.record_boolean(node, value, value.identity is not None)
         if not isinstance(value, (int, float)):
             self.fail(node, '条件或逻辑运算需要数值；srand 没有返回值')
-        return bool(value)
+        return self.record_boolean(node, value, bool(value))
 
     def declare(self, node, global_scope=False):
         scope = self.scopes[-1]
@@ -184,10 +207,15 @@ class Runtime:
         array = isinstance(node.type, ast.ArrayDecl)
         pointer = isinstance(node.type, ast.PtrDecl)
         base = node.type.type if array or pointer else node.type
+        matrix = array and isinstance(base, ast.ArrayDecl)
+        if matrix:
+            base = base.type
         if not isinstance(base, ast.TypeDecl):
             self.fail(node, '不支持此声明')
         declared_type = type_name(base.type.names) + ('*' if pointer else '')
         readonly, pointee_const = qualifiers(node.type)
+        if matrix:
+            return self.declare_matrix(node, base, declared_type, 'const' in base.quals, global_scope)
         if array:
             readonly, pointee_const = 'const' in base.quals, False
         string_initial = None
@@ -206,7 +234,7 @@ class Runtime:
                 self.fail(node, '数组容量超出本机可表示的索引范围')
             initial = Array(size)
         else:
-            initial = self.convert(0, declared_type, node) if global_scope else None
+            initial = (False if declared_type == 'bool' else self.convert(0, declared_type, node)) if global_scope else None
         scope[node.name] = Cell(declared_type, initial, self.next_identity, declaration_key(node))
         scope[node.name].pointee_const = pointee_const
         self.next_identity += 1
@@ -227,7 +255,7 @@ class Runtime:
             if len(exprs) > size:
                 self.fail(node, '数组初始化元素多于容量')
             if node.init or global_scope:
-                scope[node.name].value = Array(size, self.convert(0, declared_type, node))
+                scope[node.name].value = Array(size, False if declared_type == 'bool' else self.convert(0, declared_type, node))
             for i, expr in enumerate(exprs):
                 value, sources = self.evaluate_sources(expr)
                 self.write((node.name, scope[node.name], i), value, expr, sources)
@@ -236,7 +264,55 @@ class Runtime:
             self.write((node.name, scope[node.name], None), value, node.init, sources)
         self.writes.append((node.name, None))
         scope[node.name].readonly = readonly
-        return f'定义 {node.name} = {scope[node.name].value}'
+        return f'定义 {node.name} = {display(scope[node.name].value)}'
+
+    def dimension(self, expression, node):
+        value = self.evaluate(expression)
+        if not isinstance(value, int) or not 0 < value <= sys.maxsize:
+            self.fail(node, '数组容量必须为正整数且不超过本机索引范围')
+        return value
+
+    def declare_matrix(self, node, base, declared_type, readonly, global_scope):
+        # Evaluate each bound exactly once, in declarator order.
+        rows = self.dimension(node.type.dim, node) if node.type.dim is not None else None
+        columns = self.dimension(node.type.type.dim, node)
+        exprs = node.init.exprs or [] if isinstance(node.init, ast.InitList) else []
+        if node.init is not None and not isinstance(node.init, ast.InitList):
+            self.fail(node, '二维数组需要初始化列表')
+        entries, cursor = [], 0
+        for expr in exprs:
+            nested = isinstance(expr, ast.InitList)
+            string = declared_type == 'char' and isinstance(expr, ast.Constant) and expr.type == 'string'
+            if nested or string:
+                if cursor % columns:
+                    self.fail(expr, '嵌套初始化列表必须从数组行首开始')
+                items = expr.exprs or [] if nested else self.string_literal(expr)
+                if len(items) > columns:
+                    self.fail(expr, '数组初始化元素多于列容量')
+                for column, item in enumerate(items):
+                    if isinstance(item, ast.InitList):
+                        self.fail(item, '数组最多支持二维初始化')
+                    entries.append((cursor + column, item, string))
+                cursor += columns
+            else:
+                entries.append((cursor, expr, False))
+                cursor += 1
+        if rows is None:
+            rows = (cursor + columns - 1) // columns
+            if not rows:
+                self.fail(node, '省略数组容量时需要非空初始化列表')
+        if cursor > rows * columns:
+            self.fail(node, '数组初始化元素多于容量')
+        default = self.convert(0, declared_type, node) if node.init is not None or global_scope else None
+        cell = Cell(declared_type, Matrix(rows, columns, default), self.next_identity, declaration_key(node))
+        self.next_identity += 1
+        self.scopes[-1][node.name] = cell
+        for offset, expr, string in entries:
+            value, sources = (ord(expr), ()) if string else self.evaluate_sources(expr)
+            self.write((node.name, cell, divmod(offset, columns)), value, node, sources)
+        cell.readonly = readonly
+        self.writes.append((node.name, None))
+        return f'定义二维数组 {node.name}'
 
     def reference(self, node, address=False):
         if isinstance(node, ast.UnaryOp) and node.op == '*':
@@ -259,6 +335,10 @@ class Runtime:
     def read(self, ref, node):
         name, cell, index = ref
         value = cell.value if index is None else cell.value[index]
+        if isinstance(value, Array):
+            # A selected row decays to its first scalar element.
+            self.reads.append((name, index))
+            return Pointer(cell.identity, 0, cell.type, name, cell.readonly or getattr(ref, 'readonly', False), index)
         if value is None:
             self.fail(node, f'{name}' + (f'[{index}]' if index is not None else '') + ' 未初始化')
         self.reads.append((name, index))
@@ -280,6 +360,8 @@ class Runtime:
     def write(self, ref, value, node, sources=()):
         name, cell, index = ref
         self.check_writable(ref, node)
+        if isinstance(cell.value, Matrix) and not isinstance(index, tuple):
+            self.fail(node, '数组行不能整体赋值')
         converted = self.convert(value, cell.type, node, cell.pointee_const)
         if index is None:
             cell.value = converted
@@ -332,22 +414,26 @@ class Runtime:
             if not isinstance(left, Pointer) or not isinstance(right, Pointer) or left.base_type != right.base_type:
                 self.fail(node, '指针类型不匹配或不支持此运算')
             if op in ('==', '!='):
-                equal = (left.identity, left.index or 0) == (right.identity, right.index or 0)
-                return int(equal if op == '==' else not equal)
+                equal = (left.identity, left.row, left.index or 0) == (right.identity, right.row, right.index or 0)
+                result = int(equal if op == '==' else not equal)
+                self.record_boolean(node, result, result, (left, right))
+                return result
             self.pointer_ref(left, node, address=True)
             self.pointer_ref(right, node, address=True)
-            if left.identity != right.identity:
+            if left.identity != right.identity or left.row != right.row:
                 self.fail(node, '指针相减和顺序比较要求指向同一对象')
             a, b = left.index or 0, right.index or 0
             if op == '-':
                 return a - b
             if op in ('<', '<=', '>', '>='):
-                return int({'<': a < b, '<=': a <= b, '>': a > b, '>=': a >= b}[op])
+                result = int({'<': a < b, '<=': a <= b, '>': a > b, '>=': a >= b}[op])
+                self.record_boolean(node, result, result, (left, right))
+                return result
             self.fail(node, '不支持此指针运算')
         if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
             self.fail(node, '运算需要数值')
         both_int = isinstance(left, int) and isinstance(right, int)
-        integer_type = 'long' if isinstance(left, Long) or isinstance(right, Long) else 'int'
+        integer_type = 'long long' if isinstance(left, LongLong) or isinstance(right, LongLong) else 'long' if isinstance(left, Long) or isinstance(right, Long) else 'int'
         if op in ('/', '%') and right == 0:
             self.fail(node, '除零：除数或取余的右操作数不能为 0')
         if op == '%':
@@ -369,16 +455,29 @@ class Runtime:
         else:
             comparisons = {'<': left < right, '<=': left <= right, '>': left > right,
                            '>=': left >= right, '==': left == right, '!=': left != right}
-            return int(comparisons[op])
+            result = int(comparisons[op])
+            self.record_boolean(node, result, result, (left, right))
+            return result
         return self.convert(result, integer_type if both_int else 'double', node)
 
     def evaluate(self, node):
+        if isinstance(node, ast.Cast):
+            target = self.program._scalar_type(node.to_type.type)
+            value = self.evaluate(node.expr)
+            if target.endswith('*'):
+                if self.program.preprocessed.cast_kinds.get((node.coord.line-self.program.offset, node.coord.column)) != 'const_cast':
+                    self.fail(node, '指针转换仅支持 const_cast<T*>')
+                if not isinstance(value, Pointer) or value.base_type != target[:-1]:
+                    self.fail(node, 'const_cast 仅支持同类型单级指针')
+                return replace(value, readonly=qualifiers(node.to_type.type)[1])
+            return self.convert(value, target, node)
+
         if isinstance(node, ast.Constant):
             if node.type == 'string':
                 return self.literal_pointer(node)
-            if node.type in ('int', 'long int'):
+            if node.type in ('int', 'long int', 'long long int'):
                 value = integer_literal(node.value)
-                return self.convert(value, 'long' if node.type == 'long int' or value > 2147483647 else 'int', node)
+                return self.convert(value, 'long long' if node.type == 'long long int' else 'long' if node.type == 'long int' or value > 2147483647 else 'int', node)
             if node.type == 'char':
                 try:
                     value = literal_ast.literal_eval(node.value)
@@ -394,7 +493,8 @@ class Runtime:
             if isinstance(node, ast.ID):
                 cell = self.cell(node.name, node)
                 if isinstance(cell.value, list):
-                    return Pointer(cell.identity, 0, cell.type, node.name, cell.readonly)
+                    base_type = f'{cell.type}[{cell.value.columns}]' if isinstance(cell.value, Matrix) else cell.type
+                    return Pointer(cell.identity, 0, base_type, node.name, cell.readonly)
             return self.read(self.reference(node), node)
         if isinstance(node, ast.Assignment):
             ref = self.reference(node.lvalue)
@@ -406,9 +506,13 @@ class Runtime:
         if isinstance(node, ast.BinaryOp):
             left = self.evaluate(node.left)
             if node.op == '&&':
-                return int(self.truth(left, node.left) and self.truth(self.evaluate(node.right), node.right))
+                result = int(self.truth(left, node.left) and self.truth(self.evaluate(node.right), node.right))
+                self.record_boolean(node, result, result)
+                return result
             if node.op == '||':
-                return int(self.truth(left, node.left) or self.truth(self.evaluate(node.right), node.right))
+                result = int(self.truth(left, node.left) or self.truth(self.evaluate(node.right), node.right))
+                self.record_boolean(node, result, result)
+                return result
             return self.binary(node.op, left, self.evaluate(node.right), node)
         if isinstance(node, ast.UnaryOp):
             if node.op == '&':
@@ -434,15 +538,17 @@ class Runtime:
                 new = self.write(ref, self.binary('+' if '+' in node.op else '-', old, 1, node), node)
                 return old if node.op.startswith('p') else new
             # The signed minimum is a unary-minus expression in the parser.
-            if node.op == '-' and isinstance(node.expr, ast.Constant) and node.expr.type in ('int', 'long int'):
+            if node.op == '-' and isinstance(node.expr, ast.Constant) and node.expr.type in ('int', 'long int', 'long long int'):
                 value = -integer_literal(node.expr.value)
-                return self.convert(value, 'long' if node.expr.type == 'long int' or value < -2147483647 else 'int', node)
+                return self.convert(value, 'long long' if node.expr.type == 'long long int' else 'long' if node.expr.type == 'long int' or value < -2147483647 else 'int', node)
             value = self.evaluate(node.expr)
             if node.op == '!':
-                return int(not self.truth(value, node))
+                result = int(not self.truth(value, node.expr))
+                self.record_boolean(node, result, result)
+                return result
             if not isinstance(value, (int, float)):
                 self.fail(node, '一元运算需要数值；srand 没有返回值')
-            return self.convert(value if node.op == '+' else -value, 'long' if isinstance(value, Long) else 'int' if isinstance(value, int) else 'double', node)
+            return self.convert(value if node.op == '+' else -value, 'long long' if isinstance(value, LongLong) else 'long' if isinstance(value, Long) else 'int' if isinstance(value, int) else 'double', node)
         if isinstance(node, ast.ExprList):
             for expr in node.exprs[:-1]:
                 self.evaluate_sources(expr)
@@ -452,6 +558,8 @@ class Runtime:
                 return self.call_function(node)
             if node.name.name in ('printf', 'scanf'):
                 return getattr(formatted_io, node.name.name)(self, node)
+            if node.name.name in math_library.FUNCTIONS:
+                return math_library.execute(self, node)
             if node.name.name in standard_library.FUNCTIONS:
                 return standard_library.execute(self, node)
             return self.stdlib(node)

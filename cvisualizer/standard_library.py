@@ -50,7 +50,7 @@ def execute(rt, node):
         return ''.join(chars)
 
     def overlap(dest, source, dest_start, dest_count, source_count):
-        if dest.identity == source.identity:
+        if dest.identity == source.identity and dest.row == source.row:
             a, b = (dest.index or 0)+dest_start, source.index or 0
             if a < b+source_count and b < a+dest_count:
                 rt.fail(node, f'{name} 的源和目标区域不能重叠')

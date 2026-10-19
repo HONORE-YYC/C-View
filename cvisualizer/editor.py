@@ -5,12 +5,13 @@ from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPolygon, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QWidget, QTextEdit
 from .editing import context, escaped
+from .theme import neutral_color
 
 
 class CHighlighter(QSyntaxHighlighter):
     def highlightBlock(self, text):
         rules = [
-            (r'\b(?:int|long|char|float|double|void|const|volatile|restrict|if|else|for|while|break|continue|return)\b', '#7c3aed'),
+            (r'\b(?:int|long|char|float|double|void|bool|_Bool|true|false|static_cast|const_cast|const|volatile|restrict|if|else|for|while|break|continue|return)\b', '#7c3aed'),
             (r'\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b', '#b45309'),
             (r'\b(?:printf|scanf|abs|labs|rand|srand|atoi|atol|atof|strlen|strcpy|strncpy|strcat|strncat|strcmp|strncmp|strchr|strrchr|strstr)\b', '#0369a1'),
             (r'^\s*#\s*(?:include|define|undef)\b.*', '#0369a1'),
@@ -279,7 +280,7 @@ class CodeEditor(QPlainTextEdit):
 
     def paint_gutter(self, event):
         painter = QPainter(self.gutter)
-        painter.fillRect(event.rect(), QColor('#f3f6fa'))
+        painter.fillRect(event.rect(), neutral_color('#f3f6fa'))
         for block, top, height in self.visible_gutter_blocks():
             if top > event.rect().bottom():
                 break
@@ -293,8 +294,17 @@ class CodeEditor(QPlainTextEdit):
                     y = top + self.fontMetrics().height() // 2
                     painter.drawPolygon(QPolygon([QPoint(x, y - 5), QPoint(x, y + 5), QPoint(x + 8, y)]))
                     continue
-                painter.setPen(QColor('#8794a7'))
+                painter.setPen(neutral_color('#8794a7'))
                 painter.drawText(0, top, self.gutter.width()-9, height, Qt.AlignmentFlag.AlignRight, str(number))
+
+    def apply_theme(self, dark):
+        selections = self.extraSelections()
+        for selection in selections:
+            original = getattr(self, '_mark_color', '#fef3c7')
+            selection.format.setBackground(QColor('#40370e' if dark and original == '#fef3c7' else original))
+        self.setExtraSelections(selections)
+        self.gutter.update()
+        self.viewport().update()
 
     def mark(self, line=0, column=1, color='#fef3c7'):
         block = self.document().findBlockByNumber(line-1)
@@ -304,7 +314,9 @@ class CodeEditor(QPlainTextEdit):
             self.markChanged.emit(False)
             return
         selection = QTextEdit.ExtraSelection()
-        selection.format.setBackground(QColor(color))
+        self._mark_color = color
+        from .theme import is_dark
+        selection.format.setBackground(QColor('#40370e' if is_dark() and color == '#fef3c7' else color))
         selection.format.setProperty(QTextCharFormat.Property.FullWidthSelection, True)
         selection.cursor = QTextCursor(block)
         selection.cursor.clearSelection()

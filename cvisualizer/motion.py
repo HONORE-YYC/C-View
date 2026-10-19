@@ -32,7 +32,7 @@ def indirect_index_slots(program, bindings):
     return max((sum(a == key for a, _ in bindings) for key in indirect), default=0)
 
 
-def index_bindings(program):
+def index_bindings(program, matrices=False):
     scopes, bindings = [{}], []
 
     def lookup(name):
@@ -46,7 +46,28 @@ def index_bindings(program):
             scopes.append({})
         if isinstance(node, ast.Decl):
             scopes[-1][node.name] = node
-        if isinstance(node, ast.ArrayRef) and isinstance(node.name, ast.ID):
+        if (matrices and isinstance(node, ast.ArrayRef) and isinstance(node.name, ast.ArrayRef)
+                and isinstance(node.name.name, ast.ID)):
+            column = node.subscript
+            if isinstance(column, ast.UnaryOp) and column.op in ('++', '--', 'p++', 'p--'):
+                column = column.expr
+            row = node.name.subscript
+            if isinstance(row, ast.UnaryOp) and row.op in ('++', '--', 'p++', 'p--'):
+                row = row.expr
+            array = lookup(node.name.name.name)
+            counter = lookup(column.name) if isinstance(column, ast.ID) else None
+            selector = None
+            if isinstance(row, ast.ID) and lookup(row.name) is not None:
+                selector = ('counter', declaration_key(lookup(row.name)))
+            elif isinstance(row, ast.Constant) and row.type in ('int', 'long int', 'long long int'):
+                literal = row.value.rstrip('lL')
+                base = 16 if literal.lower().startswith('0x') else 8 if len(literal) > 1 and literal.startswith('0') else 10
+                selector = ('constant', int(literal, base))
+            if array is not None and counter is not None and selector is not None:
+                binding = declaration_key(array), selector, declaration_key(counter)
+                if binding not in bindings:
+                    bindings.append(binding)
+        if not matrices and isinstance(node, ast.ArrayRef) and isinstance(node.name, ast.ID):
             index = node.subscript
             if isinstance(index, ast.UnaryOp) and index.op in ('++', '--', 'p++', 'p--'):
                 index = index.expr
@@ -75,7 +96,7 @@ def index_bindings(program):
     return bindings
 
 
-def index_markers(bindings, variables):
+def index_markers(bindings, variables, matrix_bindings=()):
     by_declaration = {cell['declaration']: (name, cell) for name, cell in variables.items()}
     by_identity = {cell['identity']: (name, cell) for name, cell in variables.items()}
     markers = {}
@@ -84,7 +105,7 @@ def index_markers(bindings, variables):
             continue
         array, a = by_declaration[array_key]
         counter, c = by_declaration[counter_key]
-        offset = 0
+        offset, pointer_row = 0, None
         if isinstance(a['value'], Pointer):
             pointer = a['value']
             target = by_identity.get(pointer.identity)
@@ -92,6 +113,30 @@ def index_markers(bindings, variables):
                 continue
             array, a = target
             offset = pointer.index or 0
+            pointer_row = pointer.row
         if isinstance(a['value'], list) and isinstance(c['value'], int):
-            markers[array, a['identity'], counter, c['identity']] = c['value'] + offset
+            index = c['value'] + offset
+            if hasattr(a['value'], 'columns') and pointer_row is not None:
+                index = (pointer_row, index)
+            markers[array, a['identity'], counter, c['identity']] = index
+    for array_key, selector, counter_key in matrix_bindings:
+        if array_key not in by_declaration or counter_key not in by_declaration:
+            continue
+        array, a = by_declaration[array_key]
+        counter, c = by_declaration[counter_key]
+        offset = 0
+        if isinstance(a['value'], Pointer):
+            pointer = a['value']
+            target = by_identity.get(pointer.identity)
+            if target is None or pointer.row is not None:
+                continue
+            array, a = target
+            offset = pointer.index or 0
+        if selector[0] == 'counter':
+            row_cell = by_declaration.get(selector[1])
+            row = row_cell[1]['value'] if row_cell else None
+        else:
+            row = selector[1]
+        if hasattr(a['value'], 'columns') and isinstance(row, int) and isinstance(c['value'], int):
+            markers[array, a['identity'], counter+'[列]', c['identity']] = (row+offset, c['value'])
     return markers

@@ -82,7 +82,9 @@ class IndexPointer(QGraphicsItemGroup):
         from PySide6.QtWidgets import QGraphicsRectItem
         background = QGraphicsRectItem(text.boundingRect().adjusted(-2, -1, 2, 1))
         background.setPen(QPen(Qt.PenStyle.NoPen))
-        background.setBrush(QBrush(QColor(255, 255, 255, 225)))
+        from .theme import neutral_color, track_color
+        track_color(background, "brush", QColor(255, 255, 255, 225))
+        background.setBrush(QBrush(neutral_color(QColor(255, 255, 255, 225))))
         background.setPos(text.pos())
         self.addToGroup(background)
         self.addToGroup(text)
@@ -98,6 +100,10 @@ class MotionLayer(QObject):
         self.arrows, self.pointers, self.destinations = [], {}, {}
         self.origins = {}
         self.summary = None
+        self.boolean_summary = None
+        self.matrix_targets = {}
+        self.matrix_reveals = []
+        self._call_fraction = 1.
         self.animation = QVariantAnimation(self)
         self.animation.setStartValue(0.)
         self.animation.setEndValue(1.)
@@ -110,6 +116,14 @@ class MotionLayer(QObject):
 
     def clear(self):
         self.animation.stop()
+        self.matrix_targets = {}
+        if self.matrix_reveals:
+            from .matrix_animation import frame
+            frame(self.matrix_reveals, 1.)
+            self.matrix_reveals = []
+        if self.boolean_summary is not None:
+            self.boolean_summary.close()
+            self.boolean_summary = None
         if self.summary is not None:
             self.summary.close()
             self.summary = None
@@ -118,8 +132,10 @@ class MotionLayer(QObject):
                 self.scene.removeItem(item)
         self.arrows, self.pointers, self.destinations, self.origins = [], {}, {}, {}
 
-    def start(self, transfers, pointers, previous, duration, animate=True, call_summary=None):
+    def start(self, transfers, pointers, previous, duration, animate=True, call_summary=None, boolean_summary=None, matrix_reveals=(), matrix_targets=None):
         self.clear()
+        self.matrix_reveals = list(matrix_reveals) if animate else []
+        self.matrix_targets = dict(matrix_targets or {})
         moving = False
         for key, spec in pointers.items():
             point, label, lane, valid, *style = spec
@@ -139,22 +155,51 @@ class MotionLayer(QObject):
                 from .function_animation import FunctionSummary
                 self.summary = FunctionSummary(self.scene, call_summary)
                 duration = max(duration, 900, 650*len(self.summary.calls)+400)
-        if self.arrows or moving or self.summary is not None:
+            self._call_fraction = 1.
+            if boolean_summary and boolean_summary.get('evaluations'):
+                from .boolean_animation import BooleanSummary
+                self.boolean_summary = BooleanSummary(self.scene, boolean_summary)
+                boolean_duration = max(800*len(self.boolean_summary.evaluations), duration if not self.summary else 0)
+                if self.summary is not None:
+                    self._call_fraction = duration / (duration + boolean_duration)
+                    duration += boolean_duration
+                    self.boolean_summary.root.setVisible(False)
+                else:
+                    duration = boolean_duration
+        if self.arrows or moving or self.summary is not None or self.boolean_summary is not None or self.matrix_reveals:
             self.animation.setDuration(max(1, int(duration)))
             self.animation.start()
 
     def frame(self, progress):
+        if self.matrix_reveals:
+            from .matrix_animation import frame
+            reveal_progress = progress
+            if self.summary is not None:
+                call_progress = min(1., progress/self._call_fraction)
+                reveal_progress = max(0., (call_progress-.68)/.32)
+            frame(self.matrix_reveals, reveal_progress)
         t = smooth(progress / .8)
         for key, item in self.pointers.items():
             start, end = self.origins[key], self.destinations[key]
-            item.setPos(start + (end-start)*t)
+            point = start + (end-start)*t
+            target = self.matrix_targets.get(key)
+            if target is not None:
+                point = end + target.pos()-target.matrix_origin
+            item.setPos(point)
         for arrow in self.arrows:
-            arrow.frame(progress)
+            arrow.frame(max(0., min(1., (progress-.2)/.55)) if self.matrix_reveals else progress)
         if self.summary is not None:
-            self.summary.frame(progress)
+            self.summary.frame(min(1., progress/self._call_fraction))
+        if self.boolean_summary is not None:
+            start = self._call_fraction if self.summary is not None else 0.
+            self.boolean_summary.root.setVisible(progress >= start)
+            self.boolean_summary.frame(max(0., (progress-start)/(1-start)))
 
     def _complete(self):
         self.frame(1.)
+        if self.boolean_summary is not None:
+            self.boolean_summary.close()
+            self.boolean_summary = None
         for arrow in self.arrows:
             self.scene.removeItem(arrow)
         self.arrows = []

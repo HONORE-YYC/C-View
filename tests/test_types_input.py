@@ -94,7 +94,7 @@ def test_cancel_inside_function_rolls_back_and_reuses_input_on_retry():
 def test_character_display_and_long_promotion():
     from cvisualizer.views import display
     e, _, _ = run("char c='A';long x=2L;long n=x+2147483647;int i=c+1;")
-    assert display(e.runtime.snapshot()['c']['value']) == "'A' (65)"
+    assert display(e.runtime.snapshot()['c']['value']) == "'A'"
     assert e.runtime.snapshot()['n']['value'] == 2147483649
     assert e.runtime.snapshot()['i']['value'] == 66
 

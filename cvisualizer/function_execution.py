@@ -59,7 +59,19 @@ class FunctionExecution:
             array = isinstance(param.type, ast.ArrayDecl)
             pointer = isinstance(param.type, ast.PtrDecl)
             base = param.type.type if array or pointer else param.type
+            matrix = array and isinstance(base, ast.ArrayDecl)
+            columns_node = base.dim if matrix else None
+            if matrix:
+                base = base.type
             parameter_type = type_name(base.type.names)
+            if matrix:
+                saved_scopes = rt.scopes
+                rt.scopes = [saved_scopes[0], params]
+                try:
+                    columns = rt.dimension(columns_node, param)
+                finally:
+                    rt.scopes = saved_scopes
+                parameter_type += f'[{columns}]'
             # An array parameter is adjusted to a pointer in C, including local p++.
             parameter_type += '*' if pointer or array else ''
             value, sources = rt.evaluate_sources(arg)
@@ -72,9 +84,10 @@ class FunctionExecution:
                            'value': deepcopy(value), 'sources': sources})
         caller = rt.scopes
         caller_visible = rt.snapshot()
-        saved_activity = rt.reads, rt.writes, rt.transfers, rt._source_frames, rt.write_targets
+        saved_activity = rt.reads, rt.writes, rt.transfers, rt._source_frames, rt.write_targets, rt.booleans
         rt.reads, rt.writes, rt.transfers, rt._source_frames = [], [], [], []
         rt.write_targets = []
+        rt.booleans = []
         # Only globals and the callee's parameters are in lexical scope.
         rt.callers.append(caller)
         rt.scopes = [caller[0], params]
@@ -83,6 +96,7 @@ class FunctionExecution:
         if len(self.stack) == 1:
             engine._calls.append(record)
         changed = set()
+        read_targets, transfers = {}, []
         result = None
         returned = False
         try:
@@ -103,13 +117,20 @@ class FunctionExecution:
                         before = self.visible() if engine._record_detail else {}
                         rt.reads, rt.writes, rt.transfers = [], [], []
                         rt.write_targets = []
-                        description = action.run()
-                        changed.update(rt.write_targets)
+                        rt.booleans = []
+                        try:
+                            description = action.run()
+                        finally:
+                            changed.update(rt.write_targets)
+                            visible_cells = rt.visible_cells()
+                            read_targets.update(((visible_cells[name].identity, index), None)
+                                                for name, index in rt.reads if name in visible_cells)
+                            transfers.extend(rt.transfers)
                         loc = action.location
                         if engine._record_detail:
                             engine.capture_detail(Event(loc.line, loc.column, loc.text, loc.kind, str(description),
                                 self.visible(), rt.output, list(rt.reads), list(rt.writes), before=before,
-                                transfers=list(rt.transfers), function=spec.name))
+                                transfers=list(rt.transfers), function=spec.name, booleans=deepcopy(rt.booleans)))
             except _Flow as flow:
                 if flow.kind != 'return':
                     raise
@@ -122,8 +143,16 @@ class FunctionExecution:
             self.stack.pop()
             rt.scopes = caller
             rt.callers.pop()
-            rt.reads, rt.writes, rt.transfers, rt._source_frames, rt.write_targets = saved_activity
+            rt.reads, rt.writes, rt.transfers, rt._source_frames, rt.write_targets, rt.booleans = saved_activity
             rt.write_targets.extend(changed)
+            aliases = {cell['identity']: name for name, cell in caller_visible.items()}
+            for identity, index in read_targets:
+                if identity in aliases:
+                    rt.reads.append((aliases[identity], index))
+            for source, target in transfers:
+                if source[2] in aliases and target[2] in aliases:
+                    rt.transfers.append(((aliases[source[2]], source[1], source[2]),
+                                         (aliases[target[2]], target[1], target[2])))
             for name, cell in caller_visible.items():
                 for identity, index in changed:
                     if cell['identity'] == identity:

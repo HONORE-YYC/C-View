@@ -56,6 +56,35 @@ class Array(list):
         return repr(self[:8])[:-1] + (f', …（容量 {self.size}）]' if self.size > 8 else ']')
 
 
+class Matrix(Array):
+    """Sparse rows published immutably; scalar writes copy just one row/page."""
+    def __init__(self, rows, columns, default=None):
+        self.columns = int(columns)
+        super().__init__(rows, Array(columns, default))
+
+    def __getitem__(self, index):
+        if isinstance(index, tuple):
+            row, column = index
+            return super().__getitem__(row)[column]
+        return super().__getitem__(index)
+
+    def __setitem__(self, index, value):
+        if not isinstance(index, tuple) or len(index) != 2:
+            raise TypeError('Matrix writes require (row, column)')
+        row, column = index
+        from copy import deepcopy
+        changed = deepcopy(super().__getitem__(row))
+        changed[column] = value
+        super().__setitem__(row, changed)
+
+    def __deepcopy__(self, memo):
+        result = type(self)(self.size, self.columns, self.default.default)
+        result.default = self.default
+        result.pages = self.pages
+        memo[id(self)] = result
+        return result
+
+
 class Indices(Sequence):
     """A contiguous or circular range, with constant-time membership checks."""
     def __init__(self, count, start=0, capacity=None):

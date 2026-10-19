@@ -9,8 +9,9 @@ class Pointer:
     base_type: str
     name: str
     readonly: bool = False
+    row: int | None = None
 
     def __str__(self):
         if self.identity is None:
             return 'NULL'
-        return f'&{self.name}' + (f'[{self.index}]' if self.index is not None else '')
+        return f'&{self.name}' + (f'[{self.row}]' if self.row is not None else '') + (f'[{self.index}]' if self.index is not None else '')

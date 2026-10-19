@@ -36,6 +36,13 @@ def describe(binding, variables):
         return model
     size = len(raw)
     model.active = Indices(size)
+    if hasattr(raw, 'columns'):
+        model.kind = 'array'
+        model.note = f'{size} 行 × {raw.columns} 列'
+        if binding.kind != 'array':
+            model.error = '二维数组使用叠层数组视图；顺序表、栈和队列绑定适用于一维数组'
+        model.logical = OrderedValues(raw, model.active)
+        return model
 
     def scalar(name):
         value = variables.get(name, {}).get('value')

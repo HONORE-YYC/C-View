@@ -10,6 +10,7 @@ from .language import CError, Location, Program
 from .runtime import Runtime
 from .motion import index_bindings, index_markers, pointer_slots, indirect_index_slots
 from .qualifiers import qualifiers
+from .value_format import display
 
 
 @dataclass
@@ -44,6 +45,7 @@ class Event:
     calls: list = field(default_factory=list)
     function: str = ''
     expanded: bool = False
+    booleans: list = field(default_factory=list)
 
 
 class _Flow(Exception):
@@ -64,11 +66,14 @@ class Engine:
         self._record_detail = False
         self._operations = 0
         self._index_bindings = index_bindings(self.program)
+        self._matrix_index_bindings = index_bindings(self.program, matrices=True)
         self.index_lanes = {}
         for array, _ in self._index_bindings:
             self.index_lanes[array] = self.index_lanes.get(array, 0) + 1
+        for array, _, _ in self._matrix_index_bindings:
+            self.index_lanes[array] = self.index_lanes.get(array, 0) + 1
         self.index_lanes['__pointer_slots__'] = pointer_slots(self.program)
-        self.index_lanes['__indirect_index_slots__'] = indirect_index_slots(self.program, self._index_bindings)
+        self.index_lanes['__indirect_index_slots__'] = indirect_index_slots(self.program, self._index_bindings) + len(self._matrix_index_bindings)
         self.max_steps, self.count = max_steps, 0
         self.last = None
         self._pending = None
@@ -76,7 +81,7 @@ class Engine:
         self._iterator = self._program()
 
     def index_markers(self):
-        return index_markers(self._index_bindings, self.runtime.snapshot())
+        return index_markers(self._index_bindings, self.runtime.snapshot(), self._matrix_index_bindings)
 
     def peek(self):
         if self._detail:
@@ -139,6 +144,7 @@ class Engine:
         self._trace, self._calls = [], []
         self._record_detail = expand_calls
         rt.reads, rt.writes = [], []
+        rt.booleans = []
         rt.transfers = []
         rt.write_targets = []
         try:
@@ -155,7 +161,7 @@ class Engine:
             raise CError('可用内存或本机索引范围不足，请缩小数据规模', loc.line, loc.column) from None
         event = Event(loc.line, loc.column, loc.text, loc.kind, str(description),
                       rt.snapshot(), rt.output, list(rt.reads), list(rt.writes), 0, before,
-                      list(rt.transfers), list(self._calls), expanded=bool(self._trace))
+                      list(rt.transfers), list(self._calls), expanded=bool(self._trace), booleans=deepcopy(rt.booleans))
         self._pending = None
         if self._trace:
             self._detail.extend(self._trace)
@@ -193,7 +199,7 @@ class Engine:
         def check():
             value = self.runtime.evaluate(expr) if expr is not None else 1
             result[0] = self.runtime.truth(value, expr or origin)
-            return f'条件结果 = {value} → ' + ('真' if result[0] else '假')
+            return f'条件结果 = {display(value)} → ' + ('真' if result[0] else '假')
         action = self._action(expr or origin, check, 'condition')
         if expr is None:
             action.functions = ()
@@ -249,7 +255,7 @@ class Engine:
                     const_target = qualifiers(self.functions.stack[-1].node.decl.type.type)[1] if self.functions.stack else False
                     value = rt.convert(rt.evaluate(node.expr), type_name, node, const_target)
                     returned[0] = value
-                    return f'return {value}：' + ('返回调用处' if self.functions.stack else '结束程序')
+                    return f'return {display(value)}：' + ('返回调用处' if self.functions.stack else '结束程序')
                 return {'break': 'break：退出本层循环', 'continue': 'continue：进入下一轮',
                         'return': 'return：返回调用处' if self.functions.stack else 'return：结束程序'}[kind]
             yield self._action(node, perform)
@@ -263,4 +269,4 @@ class Engine:
         value = self.runtime.evaluate(node)
         if value is None:
             return f'{self.program.location(node).text}：执行完成'
-        return f'{self.program.location(node).text} → {value}'
+        return f'{self.program.location(node).text} → {display(value)}'

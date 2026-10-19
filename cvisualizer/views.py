@@ -10,19 +10,11 @@ from .structures import Binding, describe, KINDS
 from .animations import MotionLayer
 from .pointers import Pointer
 from .pointer_visuals import address_markers, RED
-from .numeric import Char
+from .value_format import display
 from .array_folding import FoldedArray, Fold
+from .matrix_visuals import is_matrix, indexed, index_label, draw_row, exposed_rect
+from .theme import neutral_color, track_color, apply_scene_theme, is_dark, cell_text_contrast
 import math
-
-
-def display(value):
-    if value is None:
-        return '?'
-    if isinstance(value, Char):
-        return f'{repr(chr(value))} ({int(value)})'
-    if isinstance(value, float):
-        return f'{value:.6g}'
-    return str(value)
 
 
 class MemoryView(QGraphicsView):
@@ -31,7 +23,7 @@ class MemoryView(QGraphicsView):
         self.setScene(QGraphicsScene(self))
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.setBackgroundBrush(QColor('#ffffff'))
+        self.setBackgroundBrush(neutral_color('#ffffff'))
         self.setMinimumWidth(340)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -41,6 +33,7 @@ class MemoryView(QGraphicsView):
         self._rendering = False
         self._has_render = False
         self.boxes = {}
+        self.matrix_stacks, self.matrix_reveals = {}, []
         self.array_anchors = {}
         self.function_boxes = {}
         self._context = ''
@@ -60,6 +53,11 @@ class MemoryView(QGraphicsView):
         for name, bar in [('scalar', self.scalar_scroll), ('array', self.array_scroll)]:
             bar.setSingleStep(24)
             bar.valueChanged.connect(lambda _, section=name: self._scroll_section(section))
+
+    def set_dark_mode(self, enabled):
+        self.setBackgroundBrush(neutral_color('#ffffff', enabled))
+        apply_scene_theme(self.scene(), enabled)
+        self.viewport().update()
 
     def _scroll_section(self, name):
         if self._rendering or name not in self._sections:
@@ -163,7 +161,8 @@ class MemoryView(QGraphicsView):
         item = self.scene().addText(str(text), font)
         if self._content_parent is not None:
             item.setParentItem(self._content_parent)
-        item.setDefaultTextColor(QColor(color))
+        track_color(item, "text", color)
+        item.setDefaultTextColor(neutral_color(color))
         item.setPos(x, self._content_y(y))
         return item
 
@@ -176,20 +175,25 @@ class MemoryView(QGraphicsView):
             border = '#60a5fa'
         if written:
             border = '#f59e0b'
-        rect = self.scene().addRect(x, self._content_y(y), width, 36 if compact else 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(QColor(fill)))
+        rect = self.scene().addRect(x, self._content_y(y), width, 36 if compact else 44, QPen(QColor(border), 2.5 if read or written else 1.3), QBrush(neutral_color(fill)))
         rect.setParentItem(self._content_parent)
+        track_color(rect, "brush", fill)
         rect.setData(0, name)
         text = name if value is None else f'{name} = {display(value)}'
         rect.setToolTip(text + ('（未初始化）' if value is None else ''))
         item = self.label(text, x+6, y+5 if compact else y+8, 9 if compact else 10, '#172b4d', True)
+        cell_text_contrast(item, '#172b4d')
         item.setToolTip(rect.toolTip())
         item.setPlainText(QFontMetricsF(item.font()).elidedText(text, Qt.TextElideMode.ElideRight, width-14))
         rect.value_label = item
         return rect
 
-    def folded_box(self, name, fold, x, y, width):
+    def folded_box(self, name, fold, x, y, width, matrix_columns=None):
         count = fold.end-fold.start
         description = f'{count} 个未赋值元素' if fold.value is None else f'{count} 个相同值：{display(fold.value)}'
+        if matrix_columns is not None:
+            description = f'{count} 个未赋值行' if fold.value is None else f'{count} 个相同行'
+            description += f' · {matrix_columns} 列'
         tooltip = f'{name}[{fold.start}..{fold.end-1}] · {description}'
         label = self.label(description, x, y-33, 9, '#64748b')
         label.setToolTip(tooltip)
@@ -212,13 +216,14 @@ class MemoryView(QGraphicsView):
         if model.kind == 'list':
             keep.update((len(model.active)-1,len(model.active)))
         keep.update(index for key,index in self._data[3].items() if key[0] == name and key[1] == cell['identity'])
-        keep.update(c['value'].index or 0 for c in variables.values()
+        keep.update((getattr(c['value'], 'row', None) if is_matrix(cell['value']) and getattr(c['value'], 'row', None) is not None else c['value'].index or 0) for c in variables.values()
                     if isinstance(c['value'],Pointer) and c['value'].identity == cell['identity'])
         if event and event.variables.get(name,{}).get('identity') == cell['identity']:
             # Whole-array declarations retain compact initialization; individual actions remain visible.
             whole = (name,None) in event.writes
             keep.update(index for n,index in event.reads + ([] if whole else event.writes)
                         if n == name and index is not None)
+        keep = {index[0] if isinstance(index, tuple) else index for index in keep}
         return FoldedArray(model.values,keep)
 
     @staticmethod
@@ -257,35 +262,47 @@ class MemoryView(QGraphicsView):
         try:
             self.motion.clear()
             self.boxes, self.array_anchors, self.function_boxes = {}, {}, {}
+            self.matrix_stacks, self.matrix_reveals = {}, []
             self._draw(variables, bindings, event)
             transfers = []
             if event and animate and not same_event and not event.calls:
                 for source, target in dict.fromkeys(event.transfers):
-                    if (source in visible_before and source in self.boxes and target in self.boxes
+                    source_front = (source[0], source[1][0], source[2]) if isinstance(source[1], tuple) else source
+                    if ((source in visible_before or source_front in visible_before) and source in self.boxes and target in self.boxes
                             and self._visible_box(source) and self._visible_box(target)):
                         color = RED if isinstance(variables.get(target[0], {}).get('value'), Pointer) else '#16a34a'
-                        transfers.append((self.boxes[source].mapRectToScene(self.boxes[source].rect()),
-                                          self.boxes[target].mapRectToScene(self.boxes[target].rect()), color))
+                        transfers.append((exposed_rect(self.boxes[source]), exposed_rect(self.boxes[target]), color))
             destinations = {}
+            matrix_targets = {}
             lanes = {}
             for key, index in pointers.items():
                 array, identity, counter, _ = key
                 lane = lanes.get((array, identity), 0)
                 lanes[array, identity] = lane+1
                 box = self.boxes.get((array, index, identity))
+                if box is None and isinstance(index, tuple):
+                    box = self.boxes.get((array, index[0], identity))
                 valid = box is not None
-                label = f"{counter} = {variables.get(counter, {}).get('value', index)}"
+                label = f"{counter} = {variables.get(counter, {}).get('value', index[1] if isinstance(index, tuple) else index)}"
                 if valid:
                     rect = box.mapRectToScene(box.rect())
                     point = QPointF(rect.left()+18+min(lane*28, rect.width()-40), rect.top()-4)
                 elif (array, identity) in self.array_anchors:
                     point = self.array_anchors[array, identity] + QPointF(0, lane*22+self._draw_offset-self._array_offset())
-                    label += '（越界）' if not 0 <= index < len(variables[array]['value']) else '（未绘制）'
+                    value = variables[array]['value']
+                    valid_index = (0 <= index[0] < len(value) and 0 <= index[1] < value.columns) if isinstance(index, tuple) else 0 <= index < len(value)
+                    label += '（越界）' if not valid_index else '（未绘制）'
                 else:
                     continue
                 destinations[key] = (point, label, lane if valid else 0, valid)
+                if box is not None and hasattr(box, 'matrix_delta'):
+                    matrix_targets[key] = box
             addresses, self._marker_sections, self._marker_targets = address_markers(self, variables, lanes)
             destinations.update(addresses)
+            for key, target in self._marker_targets.items():
+                box = self.boxes.get(target)
+                if box is not None and hasattr(box, 'matrix_delta'):
+                    matrix_targets[key] = box
             summary = None
             if event and event.calls and not event.expanded and animate and not same_event:
                 effects = []
@@ -302,14 +319,19 @@ class MemoryView(QGraphicsView):
                         before = event.before.get(name, {})
                         old = before.get('value') if before.get('identity') == cell['identity'] else None
                         if target_index is not None:
-                            old = old[target_index] if isinstance(old, list) and target_index < len(old) else None
-                        label = name if target_index is None else f'{name}[{target_index}]'
+                            old = indexed(old, target_index)
+                        label = index_label(name, target_index)
                         old_text = label if old is None else f'{label} = {display(old)}'
                         old_text = QFontMetricsF(item.value_label.font()).elidedText(old_text, Qt.TextElideMode.ElideRight, item.rect().width()-14)
                         effects.append((item, item.value_label, old_text, item.value_label.toPlainText()))
                 summary = {'calls': event.calls, 'rect': self._sections['array'][0].rect(), 'effects': effects}
+            boolean_summary = None
+            if event and getattr(event, 'booleans', None):
+                boolean_summary = {'evaluations': event.booleans,
+                                   'rect': self._sections['array'][0].rect()}
             self.motion.start(transfers, destinations, previous, duration, animate and not same_event,
-                              call_summary=summary)
+                              call_summary=summary, boolean_summary=boolean_summary,
+                              matrix_reveals=self.matrix_reveals, matrix_targets=matrix_targets)
             for key, item in self.motion.pointers.items():
                 if key in addresses:
                     item.setParentItem(self._address_clip)
@@ -356,11 +378,11 @@ class MemoryView(QGraphicsView):
                     before_cell = {}
                 old, new = before_cell.get('value'), after_cell.get('value')
                 if index is not None:
-                    old = old[index] if isinstance(old, list) and index < len(old) else None
-                    new = new[index] if isinstance(new, list) and index < len(new) else None
+                    old = indexed(old, index)
+                    new = indexed(new, index)
                 if isinstance(new, list):
                     continue
-                target = name + (f'[{index}]' if index is not None else '')
+                target = index_label(name, index)
                 changes.append(f'{target}: {display(old) if old is not None else "未赋值"} → {display(new) if new is not None else "未赋值"}')
             if changes:
                 info = self.label('  ·  '.join(changes[:8]), 16, y, 9, '#64748b')
@@ -419,6 +441,9 @@ class MemoryView(QGraphicsView):
             vertical = model.kind == 'stack'
             labels_below = not vertical or width < box_width+190
             row_height = ((112 if labels_below else 96) if vertical else 112)+marker_space
+            matrix = is_matrix(cell['value'])
+            if matrix:
+                row_height = max(row_height, 136+48*min(cell['value'].columns, 4)+marker_space)
             row_columns = 1 if vertical else columns
             row_count = (len(layout)+row_columns-1)//row_columns
             start_row, end_row = 0, row_count
@@ -430,10 +455,13 @@ class MemoryView(QGraphicsView):
                 x = 24 if vertical else 18+(pos % columns)*(box_width+12)
                 cy = y+(pos//row_columns)*row_height
                 if isinstance(index,Fold):
-                    self.folded_box(name,index,x,cy,box_width)
+                    self.folded_box(name,index,x,cy,box_width, cell['value'].columns if matrix else None)
                     if model.kind != 'array':
                         self.label('有效' if index.start in active else '空闲位', x+6,
                                    cy+45,8,'#64748b')
+                    continue
+                if matrix:
+                    draw_row(self, name, index, cell, event, x, cy, box_width)
                     continue
                 read, written = self.activity(name, index, cell, event)
                 self.boxes[name, index, cell['identity']] = self.box(f'{name}[{index}]', model.values[index], x, cy, box_width, read, written)
@@ -444,7 +472,7 @@ class MemoryView(QGraphicsView):
                 if markers:
                     self.label(' / '.join(markers), x if labels_below else x+box_width+75,
                                cy+60 if labels_below else cy+8, 9, '#0f766e', True)
-            y += max(0, row_count-1)*row_height+(82 if labels_below else 58)+10
+            y += max(0, row_count-1)*row_height+(row_height-20 if matrix else (82 if labels_below else 58))+10
             if model.kind in ('list', 'queue'):
                 order = ' → '.join(display(v) for v in model.logical[:20]) or '（空）'
                 if len(model.logical) > 20:

@@ -1,22 +1,15 @@
 #include <stdio.h>
+#include <stdlib.h>
+#define DOUBLE(x) ((x) * 2)
 
 int main(void) {
-    // 同一段代码中混合变量、数组、条件与循环。
-    int sum = 0;
-    int data[5] = {0};
-    for (int i = 0; i < 5; i++) {
-        if (i == 2) {
-            continue;
-        }
-        data[i] = i * 2;
-        sum += data[i];
-    }
-
-    int count = 3;
-    while (count > 0) {
-        count--;
-    }
-    double average = sum / 5.0;
-    printf("sum = %d, average = %f\n", sum, average);
+    // 灰框等待赋值；复制时观察绿色箭头。宏在执行前展开。
+    int pending;
+    int source = abs(-3);
+    int target;
+    target = source;
+    target = DOUBLE(target) + 1;
+    double average = target / 2.0;
+    printf("target=%d, average=%f\n", target, average);
     return 0;
 }

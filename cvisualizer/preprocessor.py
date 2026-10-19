@@ -22,6 +22,7 @@ class Token:
     column: int
     expanded: bool = False
     blocked: frozenset = frozenset()
+    cast_kind: str = ''
 
 
 @dataclass
@@ -47,6 +48,7 @@ def tokenize(text, line=1):
 class Preprocessed:
     def __init__(self, tokens):
         text, rows = [], [[]]
+        self.cast_kinds = {}
         # Token boundaries matter: NEG(-1) expands to - -1, never --1.
         separated = []
         for token in tokens:
@@ -54,6 +56,8 @@ class Preprocessed:
                 separated.append(Token(' ', token.line, token.column, True))
             separated.append(token)
         for token in separated:
+            if token.cast_kind:
+                self.cast_kinds[(len(rows), len(rows[-1])+1)] = token.cast_kind
             line, column = token.line, token.column
             for char in token.text:
                 rows[-1].append((line, column))
@@ -149,7 +153,7 @@ class Preprocessor:
 
     def directive(self, text, line):
         token = Token('', line, 1)
-        include = re.fullmatch(r'\s*#\s*include\s*(?:<(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring)>|"(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring)")\s*', text)
+        include = re.fullmatch(r'\s*#\s*include\s*(?:<(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring|math\.h|cmath|stdbool\.h)>|"(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring|math\.h|cmath|stdbool\.h)")\s*', text)
         if include:
             self.macros.setdefault('NULL', Macro(None, tokenize('0')))
             if (include[1] or include[2]) in ('stdlib.h', 'cstdlib'):
@@ -161,7 +165,7 @@ class Preprocessor:
             return
         define = re.fullmatch(r'\s*#\s*define\s+([A-Za-z_]\w*)(.*)', text, re.DOTALL)
         if not define:
-            self.fail(token, '不支持此预处理指令；支持 stdio.h/stdlib.h/cstdlib/stddef.h/string.h/cstring、#define 和 #undef')
+            self.fail(token, '不支持此预处理指令；支持 stdio.h/stdlib.h/cstdlib/stddef.h/string.h/cstring/math.h/cmath/stdbool.h、#define 和 #undef')
         name, rest = define[1], define[2]
         parameters = None
         if rest.startswith('('):
@@ -219,4 +223,6 @@ class Preprocessor:
         flush()
         if sum(len(t.text) for t in output) > 256000:
             raise CError('宏展开结果超过 256000 字符')
-        return Preprocessed(output)
+        from .casts import normalize
+        result = Preprocessed(normalize(output))
+        return result

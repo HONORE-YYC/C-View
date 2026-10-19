@@ -21,7 +21,7 @@ def format_args(rt, node):
 
 
 def tokens(rt, node, fmt, scanning=False):
-    pattern = r'%(?:(\d+)?(ld|lf|d|f|c|s)|(%))' if scanning else r'%(?:(ld|lf|d|f|c|s)|(%))'
+    pattern = r'%(?:(\d+)?(lld|ld|lf|d|f|c|s)|(%))' if scanning else r'%(?:(lld|ld|lf|d|f|c|s)|(%))'
     pieces = []
     i = 0
     while i < len(fmt):
@@ -31,7 +31,7 @@ def tokens(rt, node, fmt, scanning=False):
             continue
         match = re.match(pattern, fmt[i:])
         if not match:
-            rt.fail(node, '格式仅支持 %d、%ld、%f、%lf、%c、%s、%%（scanf 可指定宽度）')
+            rt.fail(node, '格式仅支持 %d、%ld、%lld、%f、%lf、%c、%s、%%（scanf 可指定宽度）')
         if scanning:
             width, kind, percent = match.groups()
             if width and len(width) > 6:
@@ -52,7 +52,7 @@ def c_string(rt, pointer, node):
         rt.fail(node, '%s 需要 char 数组或指针')
     chars = []
     _, cell, index = rt.pointer_ref(pointer, node)
-    capacity = len(cell.value) - index if isinstance(cell.value, list) else 1
+    capacity = cell.value.columns - index[1] if isinstance(index, tuple) else len(cell.value) - index if isinstance(cell.value, list) else 1
     for offset in range(capacity):
         if rt.consume:
             rt.consume(rt.program.location(node))
@@ -80,10 +80,10 @@ def printf(rt, node):
         value = rt.evaluate(expr)
         if kind == 's':
             text = c_string(rt, value, expr)
-        elif kind in ('d', 'ld', 'c'):
+        elif kind in ('d', 'ld', 'lld', 'c'):
             if not isinstance(value, int):
                 rt.fail(expr, f'printf %{kind} 与参数类型不匹配')
-            text = chr(value % 256) if kind == 'c' else str(value)
+            text = chr(value % 256) if kind == 'c' else str(int(value))
         else:
             if not isinstance(value, float):
                 rt.fail(expr, f'printf %{kind} 与参数类型不匹配')
@@ -105,7 +105,7 @@ def scanf(rt, node):
     targets = []
     for (kind, width), expr in zip(specs, args):
         pointer = rt.evaluate(expr)
-        expected = {'d': 'int', 'ld': 'long', 'f': 'float', 'lf': 'double', 'c': 'char', 's': 'char'}[kind]
+        expected = {'d': 'int', 'ld': 'long', 'lld': 'long long', 'f': 'float', 'lf': 'double', 'c': 'char', 's': 'char'}[kind]
         if not isinstance(pointer, Pointer) or pointer.base_type != expected:
             rt.fail(expr, f'scanf %{kind} 需要 {expected} 类型的地址')
         rt.check_writable(rt.pointer_ref(pointer, expr), expr)
@@ -151,7 +151,7 @@ def scanf(rt, node):
         remaining = rt.input_text[rt.input_position:]
         if width:
             remaining = remaining[:width]
-        if kind in ('d', 'ld'):
+        if kind in ('d', 'ld', 'lld'):
             match = re.match(r'[+-]?\d+', remaining, re.ASCII)
         elif kind in ('f', 'lf'):
             match = re.match(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', remaining, re.ASCII)
@@ -176,7 +176,7 @@ def scanf(rt, node):
         if kind in ('c', 's'):
             values = [ord(ch) for ch in text] + ([0] if kind == 's' else [])
             _, cell, index = rt.pointer_ref(pointer, node)
-            available = len(cell.value) - index if isinstance(cell.value, list) else 1
+            available = cell.value.columns - index[1] if isinstance(index, tuple) else len(cell.value) - index if isinstance(cell.value, list) else 1
             if len(values) > available:
                 rt.fail(node, 'scanf 写入超过字符数组容量；请增大数组或限制 %s 宽度')
             if any(value > 255 for value in values):
@@ -184,9 +184,9 @@ def scanf(rt, node):
             for offset, value in enumerate(values):
                 rt.write(rt.pointer_ref(rt.pointer_offset(pointer, offset, node), node), value, node)
         else:
-            if kind in ('d', 'ld') and len(text.lstrip('+-').lstrip('0')) > 19:
+            if kind in ('d', 'ld', 'lld') and len(text.lstrip('+-').lstrip('0')) > 19:
                 rt.fail(node, '输入整数溢出')
-            if kind in ('d', 'ld'):
+            if kind in ('d', 'ld', 'lld'):
                 # Avoid Python's decimal digit limit even for very long leading zeros.
                 magnitude = int(text.lstrip('+-').lstrip('0') or '0')
                 value = -magnitude if text.startswith('-') else magnitude

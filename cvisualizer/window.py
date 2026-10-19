@@ -12,11 +12,13 @@ from PySide6.QtWidgets import (
 from .bindings import BindingDialog, read_bindings, write_bindings
 from .controller import Controller
 from .editor import CodeEditor
+from .theme import stylesheet
 from .language import CError, Program
 from .views import MemoryView, display
+from .example_catalog import EXAMPLE_CATALOG, EXAMPLE_DIRECTORY
 
 
-EXAMPLES = Path(__file__).parent / 'examples'
+EXAMPLES = EXAMPLE_DIRECTORY
 STATES = {'ready': '准备就绪', 'running': '演示中', 'paused': '已暂停', 'seeking': '定位中',
           'stopped': '已停止', 'finished': '已完成', 'error': '执行错误'}
 STYLE = '''
@@ -61,6 +63,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('C View · C 语言与数据结构可视化')
         self.resize(1480, 920)
         self.setMinimumSize(1060, 700)
+        self.dark_mode = False
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance().setProperty('darkTheme', False)
         self.setStyleSheet(STYLE)
         self.controller = None
         self.bindings = []
@@ -87,15 +92,14 @@ class MainWindow(QMainWindow):
         subtitle.setObjectName('muted')
         header.addWidget(subtitle)
         header.addStretch()
+        self.theme_button = QPushButton("深色模式")
+        self.theme_button.setCheckable(True)
+        self.theme_button.toggled.connect(self.set_dark_mode)
+        header.addWidget(self.theme_button)
         self.examples = QComboBox()
         self.examples.setMinimumWidth(180)
         self.examples.addItem('选择可编辑示例…', None)
-        for filename, label in [('basics.c', '01 变量、运算与循环'), ('list.c', '02 顺序表插入与删除'),
-                                ('stack.c', '03 栈的入栈与出栈'), ('queue.c', '04 循环队列与回绕'),
-                                ('mixed.c', '05 同一程序，多种结构'), ('macros.c', '06 宏与随机数'),
-                                ('animation.c', '07 赋值与下标动画'), ('functions.c', '08 函数与数组参数'),
-                                ('pointers.c', '09 指针与取地址'), ('input.c', '10 类型与 scanf 输入'),
-                                ('strings_arrays.c', '11 数组、字符串与 const'), ('large_arrays.c', '12 大数组与滚动查看')]:
+        for filename, label in EXAMPLE_CATALOG:
             self.examples.addItem(label, filename)
         self.examples.activated.connect(self.open_example)
         header.addWidget(self.examples)
@@ -226,6 +230,17 @@ class MainWindow(QMainWindow):
         self.visuals.motion.settled.connect(self.refresh)
         start = EXAMPLES / 'basics.c'
         self.load_code(start.read_text(encoding='utf-8') if start.exists() else 'int x = 1;\nx = x + 2;\n', [])
+
+    def set_dark_mode(self, enabled):
+        self.dark_mode = bool(enabled)
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance().setProperty('darkTheme', self.dark_mode)
+        self.setStyleSheet(stylesheet(STYLE, self.dark_mode))
+        self.theme_button.setText('浅色模式' if self.dark_mode else '深色模式')
+        if self.theme_button.isChecked() != self.dark_mode:
+            self.theme_button.setChecked(self.dark_mode)
+        self.editor.apply_theme(self.dark_mode)
+        self.visuals.set_dark_mode(self.dark_mode)
 
     def load_code(self, code, bindings, path=None):
         self.timer.stop()
@@ -454,7 +469,8 @@ class MainWindow(QMainWindow):
                 value = event.variables.get(name, {}).get('value')
                 if index is not None and isinstance(value, list):
                     value = value[index]
-                text = f'{name}' + (f'[{index}]' if index is not None else '')
+                indices = index if isinstance(index, tuple) else (() if index is None else (index,))
+                text = name + ''.join(f'[{part}]' for part in indices)
                 if not isinstance(value, list):
                     changes.append(f'{text} = {display(value)}')
             self.explanation.setText(f'第 {event.line} 行 · {event.message[:320]}' +

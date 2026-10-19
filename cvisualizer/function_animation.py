@@ -2,16 +2,10 @@
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsRectItem, QGraphicsSimpleTextItem
+from .value_format import display as display_value
 
 PURPLE = '#9333ea'
 PURPLE_FILL = '#e9d5ff'
-
-
-def display_value(value):
-    if isinstance(value, (list, tuple)):
-        values = ', '.join(str(item) for item in value[:6])
-        return '[' + values + (', …' if len(value) > 6 else '') + ']'
-    return str(value)
 
 
 class FunctionSummary:

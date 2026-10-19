@@ -1,7 +1,7 @@
 """Map logical array positions to compact display slots, without expanding gaps."""
 from bisect import bisect_right
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from .arrays import Array
 
 
@@ -10,6 +10,26 @@ class Fold:
     start: int
     end: int  # Exclusive.
     value: object
+
+
+@dataclass(frozen=True)
+class RowSummary:
+    """Canonical sparse row contents, independent of page/default encoding."""
+    size: int
+    runs: tuple
+    preview: tuple = field(compare=False)
+
+    def __str__(self):
+        from .value_format import display
+        text = ', '.join(display(value) for value in self.preview)
+        return '[' + text + (', …' if self.size > len(self.preview) else '') + ']'
+
+
+def row_summary(row):
+    runs = tuple(value_runs(row))
+    if all(value is None for _, _, value in runs):
+        return None
+    return RowSummary(len(row), runs, tuple(row[:6]))
 
 
 def value_runs(values):
@@ -30,7 +50,13 @@ def value_runs(values):
         if cursor < len(values):
             yield cursor,len(values),values.default
     pending = None
+    row_cache = {}
     for start,end,value in chunks():
+        if hasattr(values, 'columns'):
+            key = id(value)
+            if key not in row_cache:
+                row_cache[key] = row_summary(value)
+            value = row_cache[key]
         if pending is not None and pending[2] == value:
             pending = (pending[0],end,value)
         else:

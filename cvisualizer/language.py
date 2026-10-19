@@ -6,6 +6,7 @@ from pycparser import c_ast as ast, c_parser, c_generator
 from .errors import CError
 from .preprocessor import Preprocessor
 from .numeric import type_name
+from .math_library import FUNCTIONS as MATH_FUNCTIONS
 from .qualifiers import qualifiers
 
 
@@ -28,6 +29,7 @@ class Function:
 _BUILTINS = {'printf', 'scanf', 'abs', 'labs', 'rand', 'srand', 'atoi', 'atol', 'atof',
              'strlen', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp',
              'strchr', 'strrchr', 'strstr'}
+_BUILTINS |= set(MATH_FUNCTIONS)
 _TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
 _GENERATOR = c_generator.CGenerator()
 
@@ -127,15 +129,25 @@ class Program:
                 self.fail(param, '函数参数暂不支持修饰符或初始化')
             type_node = param.type
             array = isinstance(type_node, ast.ArrayDecl)
+            columns = None
             if array:
-                if not isinstance(type_node.type, ast.TypeDecl) or set(type_node.dim_quals) - {'const', 'volatile', 'restrict'}:
-                    self.fail(param, '函数参数仅支持一维数组')
-                if type_node.dim is not None:
-                    self._check(type_node.dim)
-                type_node = type_node.type
+                dimensions = []
+                while isinstance(type_node, ast.ArrayDecl):
+                    dimensions.append(type_node)
+                    if set(type_node.dim_quals) - {'const', 'volatile', 'restrict'}:
+                        self.fail(param, '不支持数组参数方括号修饰符')
+                    if type_node.dim is not None:
+                        self._check(type_node.dim)
+                    type_node = type_node.type
+                if len(dimensions) > 2 or not isinstance(type_node, ast.TypeDecl):
+                    self.fail(param, '数组参数最多支持二维')
+                if len(dimensions) == 2:
+                    if dimensions[1].dim is None:
+                        self.fail(param, '二维数组参数需要列容量')
+                    columns = _GENERATOR.visit(dimensions[1].dim)
             pointer = isinstance(type_node, ast.PtrDecl)
             parameter_type = self._scalar_type(type_node)
-            types.append((parameter_type.rstrip('*'), array or pointer, qualifiers(param.type)[1]))
+            types.append((parameter_type.rstrip('*'), array or pointer, qualifiers(param.type)[1], columns))
         return params, return_type, (return_type, qualifiers(decl.type.type)[1], tuple(types))
 
     def _scalar_type(self, node, allow_void=False):
@@ -143,7 +155,7 @@ class Program:
             if set(node.quals) - {'const', 'volatile', 'restrict'} or not isinstance(node.type, ast.TypeDecl):
                 self.fail(node, '仅支持单级数值指针，不支持指针修饰符或多级指针')
             return self._scalar_type(node.type) + '*'
-        supported = (['int'], ['float'], ['double'], ['long'], ['long', 'int'], ['int', 'long'], ['char'])
+        supported = (['int'], ['float'], ['double'], ['long'], ['long', 'int'], ['int', 'long'], ['char'], ['_Bool'], ['long', 'long'], ['long', 'long', 'int'])
         if allow_void:
             supported += (['void'],)
         if (not isinstance(node, ast.TypeDecl) or set(node.quals) - {'const', 'volatile'}
@@ -193,11 +205,13 @@ class Program:
                    ast.InitList, ast.Constant, ast.ID, ast.Assignment, ast.BinaryOp,
                    ast.UnaryOp, ast.ArrayRef, ast.If, ast.For, ast.While, ast.Break,
                    ast.Continue, ast.Return, ast.EmptyStatement, ast.DeclList,
-                   ast.FuncCall, ast.ExprList)
+                   ast.FuncCall, ast.ExprList, ast.Cast, ast.Typename)
         if not isinstance(node, allowed):
             self.fail(node, f'第一版暂不支持 {type(node).__name__}')
-        if isinstance(node, ast.IdentifierType) and node.names not in (['int'], ['long'], ['long', 'int'], ['int', 'long'], ['char'], ['float'], ['double']):
+        if isinstance(node, ast.IdentifierType) and node.names not in (['int'], ['long'], ['long', 'int'], ['int', 'long'], ['char'], ['float'], ['double'], ['_Bool'], ['long', 'long'], ['long', 'long', 'int']):
             self.fail(node, '仅支持 int、long、char、float、double 类型')
+        if isinstance(node, ast.Cast):
+            self._scalar_type(node.to_type.type)
         if isinstance(node, ast.PtrDecl):
             self._scalar_type(node)
         if isinstance(node, ast.TypeDecl) and set(node.quals) - {'const', 'volatile'}:
@@ -207,22 +221,29 @@ class Program:
         if isinstance(node, ast.Decl) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
             self.fail(node, f'变量名称 {node.name} 与函数名称重复')
         if isinstance(node, ast.Decl) and isinstance(node.type, ast.ArrayDecl):
-            dim = node.type.dim
-            if dim is None and node.init is None:
-                self.fail(node, '省略数组容量时需要初始化列表或字符串')
-            if dim is not None and not self._constant_integer(dim):
-                if global_scope:
-                    self.fail(node, '全局数组容量需要整数常量表达式')
-                if node.init is not None:
-                    self.fail(node, '运行时容量的数组不能带初始化列表')
+            current, dimensions = node.type, []
+            while isinstance(current, ast.ArrayDecl):
+                dimensions.append(current)
+                current = current.type
+            if len(dimensions) > 2:
+                self.fail(node, '数组最多支持二维')
+            for axis, dimension in enumerate(dimensions):
+                dim = dimension.dim
+                if dim is None and (axis or node.init is None):
+                    self.fail(node, '仅首维容量可从初始化列表推断')
+                if dim is not None and not self._constant_integer(dim):
+                    if global_scope:
+                        self.fail(node, '全局数组容量需要整数常量表达式')
+                    if node.init is not None:
+                        self.fail(node, '运行时容量的数组不能带初始化列表')
         if isinstance(node, ast.ID) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
             self.fail(node, f'函数 {node.name} 只能用于函数调用，不能作为变量使用')
         if isinstance(node, ast.ArrayDecl):
-            if not isinstance(node.type, ast.TypeDecl) or node.dim_quals:
-                self.fail(node, '仅支持一维数组；方括号修饰符仅用于函数参数')
-        if isinstance(node, ast.Constant) and node.type not in ('int', 'long int', 'char', 'float', 'double', 'string'):
+            if not isinstance(node.type, (ast.TypeDecl, ast.ArrayDecl)) or node.dim_quals:
+                self.fail(node, '方括号修饰符仅用于函数参数')
+        if isinstance(node, ast.Constant) and node.type not in ('int', 'long int', 'long long int', 'char', 'float', 'double', 'string'):
             self.fail(node, f'暂不支持 {node.type} 常量')
-        if isinstance(node, ast.Constant) and node.type in ('int', 'long int') and len(node.value) > 32:
+        if isinstance(node, ast.Constant) and node.type in ('int', 'long int', 'long long int') and len(node.value) > 32:
             self.fail(node, '整数字面量过长；最大支持 64 位有符号 long')
         if isinstance(node, ast.Constant) and node.type in ('float', 'double') and node.value.lower().startswith('0x'):
             self.fail(node, '第一版暂不支持十六进制浮点字面量，请使用十进制')
@@ -267,7 +288,7 @@ class Program:
         if depth > 100:
             return False
         if isinstance(node, ast.Constant):
-            return node.type in ('int', 'long int', 'char')
+            return node.type in ('int', 'long int', 'long long int', 'char')
         if isinstance(node, ast.UnaryOp) and node.op in ('+', '-', '!'):
             return Program._constant_integer(node.expr, depth+1)
         if isinstance(node, ast.BinaryOp):
