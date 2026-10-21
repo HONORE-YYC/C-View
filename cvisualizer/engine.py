@@ -19,6 +19,7 @@ class Action:
     location: Location
     run: Callable
     functions: tuple = ()
+    live: frozenset = frozenset()
 
     @property
     def line(self):
@@ -58,6 +59,12 @@ class Engine:
     def __init__(self, source, max_steps=100000):
         self.program = Program(source)
         self.runtime = Runtime(self.program)
+        from .linked_liveness import LinkedLiveness
+        from .linked_state import LinkedState
+        self.linked_liveness = LinkedLiveness(self.program)
+        self.linked_state = LinkedState(self.program.linked_types)
+        self._live_stack = []
+        self._linked_candidates = []
         from .function_execution import FunctionExecution
         self.functions = FunctionExecution(self)
         self.runtime.call_function = self.functions.call
@@ -104,25 +111,75 @@ class Engine:
         return bool(self._detail)
 
     def display_snapshot(self):
-        return self.last.variables if self.last and self.last.function else self.runtime.snapshot()
+        if self.last and self.last.function:
+            return self.last.variables
+        snapshot = self.runtime.snapshot()
+        if self.last:
+            metadata = {c["identity"]: c for c in self.last.variables.values() if c.get("linked_node")}
+            for cell in snapshot.values():
+                previous = metadata.get(cell["identity"])
+                if previous:
+                    cell.update({key: previous[key] for key in ("linked_head", "linked_hidden") if key in previous})
+        return snapshot
 
     def _state(self):
         rt = self.runtime
-        return deepcopy((rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool))
+        return deepcopy((rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool, rt.heap, rt.freed))
 
     def _restore(self, state):
         rt = self.runtime
-        rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool = deepcopy(state)
+        rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool, rt.heap, rt.freed = deepcopy(state)
 
     def _consume(self, location):
         if self._operations >= self.max_steps:
             raise CError(f'达到 {self.max_steps} 步数限制，请检查循环条件', location.line, location.column)
         self._operations += 1
 
+    def _remember_linked_heads(self):
+        if not self.program.linked_types:
+            return
+        self._linked_candidates.append({n: {"type": c.type, "identity": c.identity}
+            for n, c in self.runtime.visible_cells().items()
+            if c.type.endswith("*") and "." not in n})
+
+    def _linked_context(self, event, live):
+        event._linked_candidates = list(self._linked_candidates)
+        event._linked_live = set(live).union(*self._live_stack)
+        from .struct_runtime import snapshot, flattened
+        event._linked_callers = []
+        if not self.program.linked_types:
+            return
+        for scopes in [*self.runtime.callers, self.runtime.scopes]:
+            for scope in scopes:
+                # Keep identities hidden by a same-name inner declaration.
+                event._linked_callers.extend(snapshot(self.runtime, flattened(scope)).items())
+
+    def _linked_event(self, event):
+        if not self.program.linked_types:
+            return
+        if self.last:
+            previous = {c["identity"]: c for c in self.last.variables.values() if c.get("linked_node")}
+            for cell in event.before.values():
+                old = previous.get(cell["identity"], {})
+                cell.update({key: old[key] for key in ("linked_head", "linked_hidden") if key in old})
+        self.linked_state.discover(event.before)
+        for candidate in getattr(event, "_linked_candidates", ()):
+            self.linked_state.discover(candidate)
+        self.linked_state.discover(dict(getattr(event, "_linked_callers", ())))
+        live = set(getattr(event, "_linked_live", set()))
+        for name, _ in event.reads + event.writes:
+            live.add(name.split(".", 1)[0].split("[", 1)[0])
+        for source, destination in event.transfers:
+            for name, _, _ in (source, destination):
+                live.add(name.split(".", 1)[0].split("[", 1)[0])
+        self.linked_state.decorate(event.variables, live, event.number, getattr(event, "_linked_callers", ()))
+
     def capture_detail(self, event):
         if self._record_detail:
             if len(self._trace) >= 2000:
                 raise CError('单次函数展开超过 2000 步，请缩小示例或使用快速演示', event.line, event.column)
+            if not hasattr(event, "_linked_live"):
+                self._linked_context(event, self._live_stack[-1] if self._live_stack else set())
             self._trace.append((event, self._state()))
 
     def step(self, expand_calls=False):
@@ -135,6 +192,7 @@ class Engine:
             self._restore(state)
             self.count += 1
             event.number = self.count
+            self._linked_event(event)
             self.last = event
             return event
         action = self.peek()
@@ -147,13 +205,18 @@ class Engine:
         backup = self._state()
         before = rt.snapshot()
         self._trace, self._calls = [], []
+        self._linked_candidates = []
         self._record_detail = expand_calls
         rt.reads, rt.writes = [], []
         rt.booleans = []
         rt.transfers = []
         rt.write_targets = []
         try:
-            description = action.run()
+            self._live_stack.append(action.live)
+            try:
+                description = action.run()
+            finally:
+                self._live_stack.pop()
         except CError:
             self._restore(backup)
             self._operations = operations_before
@@ -167,6 +230,7 @@ class Engine:
         event = Event(loc.line, loc.column, loc.text, loc.kind, str(description),
                       rt.snapshot(), rt.output, list(rt.reads), list(rt.writes), 0, before,
                       list(rt.transfers), list(self._calls), expanded=bool(self._trace), booleans=deepcopy(rt.booleans))
+        self._linked_context(event, action.live)
         self._pending = None
         if self._trace:
             self._detail.extend(self._trace)
@@ -175,6 +239,7 @@ class Engine:
             return self.step(expand_calls=True)
         self.count += 1
         event.number = self.count
+        self._linked_event(event)
         self.last = event
         return self.last
 
@@ -186,7 +251,7 @@ class Engine:
             for _, child in current.children():
                 visit(child)
         visit(node)
-        return Action(self.program.location(node, kind), fn, tuple(dict.fromkeys(calls)))
+        return Action(self.program.location(node, kind), fn, tuple(dict.fromkeys(calls)), frozenset(self.linked_liveness.after.get(id(node), self.linked_liveness.reads(node))))
 
     def _program(self):
         for node in self.program.globals:

@@ -9,6 +9,8 @@ from .numeric import type_name
 from .type_registry import TypeRegistry
 from .math_library import FUNCTIONS as MATH_FUNCTIONS
 from .qualifiers import qualifiers
+from .linked_language import lower, linked_types, SourceGenerator
+from .stream_io import chain as stream_chain, NAMES as STREAM_NAMES
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,7 @@ class Function:
 
 _BUILTINS = {'printf', 'scanf', 'abs', 'labs', 'rand', 'srand', 'atoi', 'atol', 'atof',
              'strlen', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp',
-             'strchr', 'strrchr', 'strstr'}
+             'strchr', 'strrchr', 'strstr', '__cv_delete'}
 _BUILTINS |= set(MATH_FUNCTIONS)
 _TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
 _GENERATOR = c_generator.CGenerator()
@@ -41,6 +43,8 @@ class Program:
             raise CError('代码超过 64000 字符，请缩小教学示例')
         self.source = source
         self.preprocessed = Preprocessor().process(source)
+        self.stream_names = STREAM_NAMES if self.preprocessed.iostream else set()
+        self.allocations, self.reference_parameters, self.deletions = lower(self.preprocessed)
         cleaned = self.preprocessed.text
         # A string such as printf("main(") is not a function definition.
         masked = _TOKENS.sub(lambda m: ' ' * len(m[0]), cleaned)
@@ -53,9 +57,11 @@ class Program:
             line, column = self.preprocessed.original(max(1, int(match[1])-self.offset), int(match[2])) if match else (0, 0)
             detail = str(exc).split(': ', 1)[-1]
             raise CError(f'C 语法错误：{detail}', line, column) from None
+        self.generator = SourceGenerator(self)
         self.type_registry = TypeRegistry(self).normalize(self.tree)
         self.structs = self.type_registry.structs
         self.structure_names = self.type_registry.names
+        self.linked_types = linked_types(self)
         self.globals = []
         self.main = None
         self.functions = {}
@@ -66,7 +72,7 @@ class Program:
             decl = node.decl if definition else node
             if isinstance(decl, ast.Decl) and isinstance(decl.type, ast.FuncDecl):
                 name = decl.name
-                if name in _BUILTINS:
+                if name in _BUILTINS | self.stream_names:
                     self.fail(decl, f'{name} 是内置函数保留名称')
                 if definition and name in definitions:
                     self.fail(decl, f'函数 {name} 重复定义')
@@ -98,7 +104,7 @@ class Program:
         self._calls = {name: set() for name in definitions}
         for function in definitions.values():
             for param in function.params:
-                if param.name in definitions or param.name in _BUILTINS:
+                if param.name in definitions or param.name in _BUILTINS | self.stream_names:
                     self.fail(param, f'参数名称 {param.name} 与函数名称重复')
             self._check(function.node.body, function=function)
         self._field_ids = {id(field) for spec in self.structs.values() for field in spec.fields or []}
@@ -135,6 +141,8 @@ class Program:
             if (isinstance(param, ast.Decl)
                                and (param.storage or param.funcspec or param.init or param.bitsize)):
                 self.fail(param, '函数参数暂不支持修饰符或初始化')
+            if self.is_reference(param) and any(qualifiers(param.type)):
+                self.fail(param, '引用参数暂不支持 const 修饰符')
             type_node = param.type
             array = isinstance(type_node, ast.ArrayDecl)
             columns = None
@@ -155,8 +163,12 @@ class Program:
                     columns = _GENERATOR.visit(dimensions[1].dim)
             pointer = isinstance(type_node, ast.PtrDecl)
             parameter_type = self._scalar_type(type_node)
-            types.append((parameter_type.rstrip('*'), array or pointer, qualifiers(param.type)[1], columns))
+            types.append((parameter_type.rstrip('*'), array or pointer, qualifiers(param.type)[1], columns, self.is_reference(param)))
         return params, return_type, (return_type, qualifiers(decl.type.type)[1], tuple(types))
+
+    def is_reference(self, param):
+        loc = self.location(param)
+        return (loc.line, loc.column, param.name) in self.reference_parameters
 
     def _scalar_type(self, node, allow_void=False):
         if isinstance(node, ast.PtrDecl):
@@ -201,7 +213,7 @@ class Program:
         coord = node.coord
         line, column = self.preprocessed.original(max(1, coord.line-self.offset), coord.column) if coord else (1, 1)
         text = self.type_registry.original.get(id(node))
-        return Location(line, column, text if text is not None else _GENERATOR.visit(node), kind)
+        return Location(line, column, text if text is not None else self.generator.visit(node), kind)
 
     def fail(self, node, message):
         # Reporting invalid/deep ASTs must not regenerate the invalid subtree.
@@ -214,6 +226,18 @@ class Program:
             return
         if depth > 100:
             self.fail(node, '表达式或代码块嵌套过深（最多 100 层）')
+        stream = stream_chain(node)
+        if stream:
+            if not self.preprocessed.iostream:
+                self.fail(node, 'cin/cout 需要 #include <iostream>')
+            if global_scope:
+                self.fail(node, 'cin/cout 请在函数或可执行语句中使用')
+            name, args = stream
+            for arg in args:
+                if name == 'cout' and isinstance(arg, ast.ID) and arg.name == 'endl':
+                    continue
+                self._check(arg, loops, depth+1, function, global_scope)
+            return
         allowed = (ast.Compound, ast.Decl, ast.TypeDecl, ast.IdentifierType, ast.ArrayDecl, ast.PtrDecl,
                    ast.InitList, ast.Constant, ast.ID, ast.Assignment, ast.BinaryOp,
                    ast.UnaryOp, ast.ArrayRef, ast.Struct, ast.StructRef, ast.If, ast.For, ast.While, ast.Break,
@@ -240,7 +264,7 @@ class Program:
             self.fail(node, '暂不支持类型修饰符')
         if isinstance(node, ast.Decl) and (node.storage or node.funcspec or node.bitsize):
             self.fail(node, '暂不支持类型修饰符、存储修饰符或位域')
-        if isinstance(node, ast.Decl) and id(node) not in getattr(self, '_field_ids', set()) and node.name in (self.functions.keys() | _BUILTINS | {'main'}):
+        if isinstance(node, ast.Decl) and id(node) not in getattr(self, '_field_ids', set()) and node.name in (self.functions.keys() | _BUILTINS | {'main'} | self.stream_names):
             self.fail(node, f'变量名称 {node.name} 与函数名称重复')
         if isinstance(node, ast.Decl) and isinstance(node.type, ast.ArrayDecl):
             current, dimensions = node.type, []
@@ -273,7 +297,7 @@ class Program:
             self.fail(node, f'暂不支持运算符 {node.op}')
         if isinstance(node, ast.BinaryOp) and node.op not in ('+', '-', '*', '/', '%', '<', '<=', '>', '>=', '==', '!=', '&&', '||'):
             self.fail(node, f'暂不支持运算符 {node.op}')
-        if isinstance(node, ast.UnaryOp) and node.op not in ('+', '-', '!', 'p++', 'p--', '++', '--', '&', '*'):
+        if isinstance(node, ast.UnaryOp) and node.op not in ('+', '-', '!', 'p++', 'p--', '++', '--', '&', '*', 'sizeof'):
             self.fail(node, f'暂不支持运算符 {node.op}')
         if isinstance(node, (ast.Break, ast.Continue)) and not loops:
             self.fail(node, 'break/continue 只能出现在循环内')
@@ -282,12 +306,24 @@ class Program:
                 self.fail(node, 'void 函数的 return 不能带返回值')
             if function.return_type != 'void' and node.expr is None:
                 self.fail(node, '非 void 函数的 return 必须带返回值')
+        if isinstance(node, ast.UnaryOp) and node.op == 'sizeof':
+            loc = self.location(node)
+            if (loc.line, loc.column) not in self.allocations:
+                self.fail(node, '暂不支持 sizeof')
+            if not isinstance(node.expr, ast.Typename) or not isinstance(node.expr.type, ast.TypeDecl) or not isinstance(node.expr.type.type, ast.Struct):
+                self.fail(node, 'new 仅支持完整结构体')
+            self.type_registry.complete_object(node.expr.type, node)
+            return
         if isinstance(node, ast.FuncCall):
             if global_scope:
                 self.fail(node, '全局变量初始化必须使用常量，不能调用函数')
             if not isinstance(node.name, ast.ID):
                 self.fail(node, '仅支持通过函数名称直接调用')
             name = node.name.name
+            if name == '__cv_delete':
+                loc = self.location(node)
+                if (loc.line, loc.column) not in self.deletions:
+                    self.fail(node, '内部 delete 名称不能直接调用')
             if name == 'main':
                 self.fail(node, 'main 是程序入口，不能作为函数调用')
             if name not in self.functions and name not in _BUILTINS:

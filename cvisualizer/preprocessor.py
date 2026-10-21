@@ -82,6 +82,7 @@ class Preprocessor:
     def __init__(self):
         self.macros = {}
         self.expansions = 0
+        self.iostream = False
 
     @staticmethod
     def fail(token, message):
@@ -153,8 +154,9 @@ class Preprocessor:
 
     def directive(self, text, line):
         token = Token('', line, 1)
-        include = re.fullmatch(r'\s*#\s*include\s*(?:<(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring|math\.h|cmath|stdbool\.h)>|"(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring|math\.h|cmath|stdbool\.h)")\s*', text)
+        include = re.fullmatch(r'\s*#\s*include\s*(?:<(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring|math\.h|cmath|stdbool\.h|iostream)>|"(stdio\.h|stdlib\.h|cstdlib|stddef\.h|string\.h|cstring|math\.h|cmath|stdbool\.h|iostream)")\s*', text)
         if include:
+            self.iostream |= (include[1] or include[2]) == 'iostream'
             self.macros.setdefault('NULL', Macro(None, tokenize('0')))
             if (include[1] or include[2]) in ('stdlib.h', 'cstdlib'):
                 self.macros.setdefault('RAND_MAX', Macro(None, tokenize('32767')))
@@ -165,7 +167,7 @@ class Preprocessor:
             return
         define = re.fullmatch(r'\s*#\s*define\s+([A-Za-z_]\w*)(.*)', text, re.DOTALL)
         if not define:
-            self.fail(token, '不支持此预处理指令；支持 stdio.h/stdlib.h/cstdlib/stddef.h/string.h/cstring/math.h/cmath/stdbool.h、#define 和 #undef')
+            self.fail(token, '不支持此预处理指令；支持 stdio.h/stdlib.h/cstdlib/stddef.h/string.h/cstring/math.h/cmath/stdbool.h/iostream、#define 和 #undef')
         name, rest = define[1], define[2]
         parameters = None
         if rest.startswith('('):
@@ -224,5 +226,7 @@ class Preprocessor:
         if sum(len(t.text) for t in output) > 256000:
             raise CError('宏展开结果超过 256000 字符')
         from .casts import normalize
-        result = Preprocessed(normalize(output))
+        from .stream_io import normalize as normalize_streams
+        result = Preprocessed(normalize(normalize_streams(output)))
+        result.iostream = self.iostream
         return result

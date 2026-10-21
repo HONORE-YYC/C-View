@@ -26,7 +26,7 @@ c-view = "cvisualizer.__main__:main"
 include = ["cvisualizer*"]
 
 [tool.setuptools.package-data]
-cvisualizer = ["examples/*.c", "examples/*.json"]
+cvisualizer = ["examples/*.c", "examples/*.json", "templates/*.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

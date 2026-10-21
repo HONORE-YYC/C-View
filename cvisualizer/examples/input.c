@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <iostream>
+using namespace std;
 
 int main(void) {
     long long count;
@@ -12,8 +14,12 @@ int main(void) {
     if (matched == 4) {
         double total = count * price;
         char next = grade + 1;
-        printf("%s: 数量=%lld, 总价=%lf, 等级=%c, 下一等级=%c\n",
-               name, count, total, grade, next);
+        cout << name << ": 数量=" << count << ", 总价=" << total
+             << ", 等级=" << grade << ", 下一等级=" << next << endl;
     }
+    // 也可以把上面的 scanf 语句替换为以下两行：
+    // cin >> count >> price >> grade >> name;
+    // int matched = 4;
+    // cin 会按目标类型读取；字符数组仍需为末尾的结束符预留容量。
     return 0;
 }

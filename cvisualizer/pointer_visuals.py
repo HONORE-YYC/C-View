@@ -19,6 +19,8 @@ def address_markers(view, variables, blue_lanes):
         if target is None:
             continue
         target_name, target_cell = target
+        if target_cell.get('linked_node'):
+            continue
         # Aggregate instances are represented by their member cards, so anchor
         # a structure pointer to its first visible member instead of a hidden root.
         if target_cell.get('is_struct'):

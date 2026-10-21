@@ -16,6 +16,15 @@ def app():
 
 
 @pytest.fixture(autouse=True)
+def isolate_window_preferences(request, tmp_path, monkeypatch):
+    if 'app' in request.fixturenames:
+        from PySide6.QtCore import QSettings
+        import cvisualizer.window as module
+        path = str(tmp_path / 'preferences.ini')
+        monkeypatch.setattr(module, 'QSettings', lambda *args: QSettings(path, QSettings.Format.IniFormat))
+
+
+@pytest.fixture(autouse=True)
 def dispose_qt_widgets(request):
     if 'app' not in request.fixturenames:
         yield

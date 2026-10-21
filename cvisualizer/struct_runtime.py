@@ -63,6 +63,8 @@ def snapshot(rt, visible):
     for name, cell in visible.items():
         item={'type':cell.type,'value':deepcopy(cell.value),'identity':cell.identity,'declaration':cell.declaration}
         if isinstance(cell.value,(StructValue,StructArray)): item['is_struct']=True
+        if isinstance(cell.value,StructValue) and cell.type in rt.program.linked_types:
+            item['linked_node']=dict(rt.program.linked_types[cell.type])
         if '.' in name:
             owner=name.rsplit('.',1)[0]
             parent=visible.get(owner)

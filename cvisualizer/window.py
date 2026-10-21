@@ -1,7 +1,7 @@
 """The complete desktop workflow. C execution stays in controller/engine."""
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QAbstractAnimation
+from PySide6.QtCore import Qt, QTimer, QAbstractAnimation, QSettings, QSignalBlocker
 from PySide6.QtGui import QAction, QKeySequence, QCursor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -16,6 +16,8 @@ from .theme import stylesheet
 from .language import CError, Program
 from .views import MemoryView, display
 from .example_catalog import EXAMPLE_CATALOG, EXAMPLE_DIRECTORY
+from .value_format import display_name
+from .template_catalog import TEMPLATE_CATALOG, TEMPLATE_DIRECTORY
 
 
 EXAMPLES = EXAMPLE_DIRECTORY
@@ -60,6 +62,7 @@ def panel(title, subtitle=''):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.settings = QSettings('HONORE-YYC', 'C View')
         self.setWindowTitle('C View · C 语言与数据结构可视化')
         self.resize(1480, 920)
         self.setMinimumSize(1060, 700)
@@ -96,6 +99,14 @@ class MainWindow(QMainWindow):
         self.theme_button.setCheckable(True)
         self.theme_button.toggled.connect(self.set_dark_mode)
         header.addWidget(self.theme_button)
+        self.template_button = QPushButton('标准模板')
+        self.template_button.setToolTip('导入可识别为特殊演示结构的标准代码，导入后可自由编辑')
+        template_menu = QMenu(self.template_button)
+        for filename, label in TEMPLATE_CATALOG:
+            action = template_menu.addAction(label)
+            action.triggered.connect(lambda checked=False, filename=filename: self.open_template(filename))
+        self.template_button.setMenu(template_menu)
+        header.addWidget(self.template_button)
         self.examples = QComboBox()
         self.examples.setMinimumWidth(180)
         self.examples.addItem('选择可编辑示例…', None)
@@ -201,7 +212,7 @@ class MainWindow(QMainWindow):
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
         self.output.setMaximumHeight(125)
-        self.output.setPlaceholderText('printf 的输出会出现在这里')
+        self.output.setPlaceholderText('printf / cout 的输出会出现在这里')
         right_layout.addWidget(self.output)
         right_layout.addWidget(QLabel('步骤记录（最近 300 行）'))
         self.log = QPlainTextEdit()
@@ -216,7 +227,7 @@ class MainWindow(QMainWindow):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         root.addWidget(self.status)
-        footer = QLabel('教学子集：变量、数组、typedef、结构体、单级指针、循环、非递归函数和常用标准库。暂不支持动态内存和递归。')
+        footer = QLabel('教学子集：变量、数组、typedef、结构体、单链表、单级指针、循环和非递归函数。支持结构体节点的 new/delete。')
         footer.setObjectName('muted')
         footer.setWordWrap(True)
         root.addWidget(footer)
@@ -228,19 +239,28 @@ class MainWindow(QMainWindow):
             action.triggered.connect(callback)
             self.addAction(action)
         self.visuals.motion.settled.connect(self.refresh)
-        start = EXAMPLES / 'basics.c'
-        self.load_code(start.read_text(encoding='utf-8') if start.exists() else 'int x = 1;\nx = x + 2;\n', [])
+        self.load_code('', [])
+        self.set_dark_mode(self.settings.value('appearance/darkMode', False, type=bool), persist=False)
 
-    def set_dark_mode(self, enabled):
+    def show_linked_list_notice(self):
+        from .linked_help import LinkedListNotice
+        if getattr(self, 'linked_list_notice', None) is None:
+            self.linked_list_notice = LinkedListNotice(self)
+        self.linked_list_notice.open()
+
+    def set_dark_mode(self, enabled, persist=True):
         self.dark_mode = bool(enabled)
         from PySide6.QtWidgets import QApplication
         QApplication.instance().setProperty('darkTheme', self.dark_mode)
         self.setStyleSheet(stylesheet(STYLE, self.dark_mode))
         self.theme_button.setText('浅色模式' if self.dark_mode else '深色模式')
-        if self.theme_button.isChecked() != self.dark_mode:
+        with QSignalBlocker(self.theme_button):
             self.theme_button.setChecked(self.dark_mode)
         self.editor.apply_theme(self.dark_mode)
         self.visuals.set_dark_mode(self.dark_mode)
+        if persist:
+            self.settings.setValue('appearance/darkMode', self.dark_mode)
+            self.settings.sync()
 
     def load_code(self, code, bindings, path=None):
         self.timer.stop()
@@ -305,7 +325,7 @@ class MainWindow(QMainWindow):
         self.output.setPlainText(prompt['output'])
         self.status.setText(f'等待输入 · 第 {prompt["line"]} 行')
         text, accepted = QInputDialog.getText(
-            self, 'scanf 输入',
+            self, f'{prompt.get("kind", "scanf")} 输入',
             f'第 {prompt["line"]} 行：{prompt["statement"]}\n'
             '请输入数据（多个值可用空格分隔，确认相当于按回车）：')
         return text if accepted else None
@@ -474,7 +494,7 @@ class MainWindow(QMainWindow):
                 if index is not None and isinstance(value, list):
                     value = value[index]
                 indices = index if isinstance(index, tuple) else (() if index is None else (index,))
-                text = name + ''.join(f'[{part}]' for part in indices)
+                text = display_name(name) + ''.join(f'[{part}]' for part in indices)
                 if not isinstance(value, list):
                     changes.append(f'{text} = {display(value)}')
             self.explanation.setText(f'第 {event.line} 行 · {event.message[:320]}' +
@@ -525,6 +545,12 @@ class MainWindow(QMainWindow):
         if self.can_discard():
             self.read_file(EXAMPLES / filename, example=True)
 
+    def open_template(self, filename='singly_linked_list.cpp'):
+        self.pause()
+        if self.can_discard():
+            return self.read_file(TEMPLATE_DIRECTORY / filename, example=True)
+        return False
+
     def open_file(self):
         self.pause()
         if not self.can_discard():
@@ -543,6 +569,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '无法打开文件', str(error))
             return
         self.load_code(code, bindings, None if example else path)
+        return True
 
     def save_to(self, path):
         path = Path(path)

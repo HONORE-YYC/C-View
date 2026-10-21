@@ -13,7 +13,7 @@ class CHighlighter(QSyntaxHighlighter):
         rules = [
             (r'\b(?:int|long|char|float|double|void|bool|_Bool|true|false|typedef|struct|static_cast|const_cast|const|volatile|restrict|if|else|for|while|break|continue|return)\b', '#7c3aed'),
             (r'\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b', '#b45309'),
-            (r'\b(?:printf|scanf|abs|labs|rand|srand|atoi|atol|atof|strlen|strcpy|strncpy|strcat|strncat|strcmp|strncmp|strchr|strrchr|strstr)\b', '#0369a1'),
+            (r'\b(?:printf|scanf|cin|cout|endl|using|namespace|std|abs|labs|rand|srand|atoi|atol|atof|strlen|strcpy|strncpy|strcat|strncat|strcmp|strncmp|strchr|strrchr|strstr)\b', '#0369a1'),
             (r'^\s*#\s*(?:include|define|undef)\b.*', '#0369a1'),
             (r'"(?:\\.|[^"\\])*"', '#047857'),
             (r'//.*$', '#7b8a9e'),

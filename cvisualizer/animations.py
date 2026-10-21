@@ -12,7 +12,7 @@ def smooth(value):
 
 
 class TransferArrow(QGraphicsPathItem):
-    def __init__(self, source, target, color='#16a34a'):
+    def __init__(self, source, target, color='#16a34a', source_item=None, target_item=None):
         super().__init__()
         color = QColor(color)
         self.setPen(QPen(color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
@@ -20,6 +20,12 @@ class TransferArrow(QGraphicsPathItem):
         self.head.setPen(QPen(Qt.PenStyle.NoPen))
         self.head.setBrush(QBrush(color))
         self.setZValue(20)
+        self.source_item, self.target_item = source_item, target_item
+        self._source_rect, self._target_rect = source, target
+        self._set_route(source, target)
+        self.frame(0)
+
+    def _set_route(self, source, target):
         if abs(source.center().y() - target.center().y()) < 15:
             start, end = source.topLeft() + QPointF(source.width()/2, -2), target.topLeft() + QPointF(target.width()/2, -2)
             lift = min(75, max(36, abs(end.x()-start.x())*.18))
@@ -38,9 +44,13 @@ class TransferArrow(QGraphicsPathItem):
             c1, c2 = start + QPointF(0, direction*bend), end - QPointF(0, direction*bend)
         self.route = QPainterPath(start)
         self.route.cubicTo(c1, c2, end)
-        self.frame(0)
 
     def frame(self, progress):
+        if self.source_item is not None or self.target_item is not None:
+            from .matrix_visuals import exposed_rect
+            source = exposed_rect(self.source_item) if self.source_item is not None else self._source_rect
+            target = exposed_rect(self.target_item) if self.target_item is not None else self._target_rect
+            self._set_route(source, target)
         growth = smooth(progress / .68)
         path = QPainterPath(self.route.pointAtPercent(0))
         for step in range(1, 41):
@@ -101,6 +111,7 @@ class MotionLayer(QObject):
         self.origins = {}
         self.summary = None
         self.boolean_summary = None
+        self.linked_layer = None
         self.matrix_targets = {}
         self.matrix_reveals = []
         self._call_fraction = 1.
@@ -116,6 +127,9 @@ class MotionLayer(QObject):
 
     def clear(self):
         self.animation.stop()
+        if self.linked_layer is not None:
+            self.linked_layer.frame(1.)
+            self.linked_layer = None
         self.matrix_targets = {}
         if self.matrix_reveals:
             from .matrix_animation import frame
@@ -132,8 +146,9 @@ class MotionLayer(QObject):
                 self.scene.removeItem(item)
         self.arrows, self.pointers, self.destinations, self.origins = [], {}, {}, {}
 
-    def start(self, transfers, pointers, previous, duration, animate=True, call_summary=None, boolean_summary=None, matrix_reveals=(), matrix_targets=None):
+    def start(self, transfers, pointers, previous, duration, animate=True, call_summary=None, boolean_summary=None, matrix_reveals=(), matrix_targets=None, linked_layer=None):
         self.clear()
+        self.linked_layer = linked_layer
         self.matrix_reveals = list(matrix_reveals) if animate else []
         self.matrix_targets = dict(matrix_targets or {})
         moving = False
@@ -166,11 +181,14 @@ class MotionLayer(QObject):
                     self.boolean_summary.root.setVisible(False)
                 else:
                     duration = boolean_duration
-        if self.arrows or moving or self.summary is not None or self.boolean_summary is not None or self.matrix_reveals:
+        if self.arrows or moving or self.summary is not None or self.boolean_summary is not None or self.matrix_reveals or (linked_layer is not None and linked_layer.animate and (linked_layer.model or linked_layer.old_model)):
             self.animation.setDuration(max(1, int(duration)))
             self.animation.start()
 
     def frame(self, progress):
+        if self.linked_layer is not None:
+            linked_progress = max(0., (min(1., progress/self._call_fraction)-.68)/.32) if self.summary is not None else progress
+            self.linked_layer.frame(linked_progress)
         if self.matrix_reveals:
             from .matrix_animation import frame
             reveal_progress = progress

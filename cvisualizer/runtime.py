@@ -15,6 +15,7 @@ from . import math_library
 from . import struct_runtime
 from .struct_runtime import StructValue
 from . import formatted_io
+from . import stream_io
 from . import standard_library
 from .arrays import Array, Matrix
 from .qualifiers import qualifiers
@@ -62,6 +63,8 @@ class Runtime:
         self.program = program
         self.scopes = [{}]
         self.callers = []
+        self.heap = {}
+        self.freed = set()
         self.write_targets = []
         self.output = ''
         self.reads, self.writes = [], []
@@ -86,7 +89,9 @@ class Runtime:
         visible = {}
         for scope in self.scopes:
             visible.update(scope)
+        visible.update(self.heap)
         visible = struct_runtime.flattened(visible)
+        visible = {name: cell for name, cell in visible.items() if cell.identity not in self.freed}
         identities = {cell.identity for cell in visible.values()}
         for value in list(visible.values()):
             pointer = value.value
@@ -103,8 +108,13 @@ class Runtime:
         return struct_runtime.snapshot(self, self.visible_cells())
 
     def find_identity(self, identity):
+        if identity in self.freed:
+            return None
         if identity in self.literals:
             return f'字符串{identity}', self.literals[identity]
+        for name, cell in struct_runtime.flattened(self.heap).items():
+            if cell.identity == identity:
+                return name, cell
         for scopes in [self.scopes] + list(reversed(self.callers)):
             for scope in reversed(scopes):
                 for name, cell in struct_runtime.flattened(scope).items():
@@ -152,6 +162,8 @@ class Runtime:
     def cell(self, name, node):
         for scope in reversed(self.scopes):
             if name in scope:
+                if scope[name].identity in self.freed:
+                    self.fail(node, '引用目标已释放')
                 return scope[name]
         self.fail(node, f'变量 {name} 未声明')
 
@@ -506,7 +518,9 @@ class Runtime:
                     self.fail(node, '不支持此字符转义')
                 if len(value) != 1 or ord(value) > 255:
                     self.fail(node, 'char 常量需要单个 0–255 字符')
-                return ord(value)
+                # Stream-enabled code needs C++ char literal type for insertion;
+                # ordinary C snippets retain int literal semantics.
+                return Char(ord(value)) if self.program.preprocessed.iostream else ord(value)
             if node.type in ('float', 'double'):
                 return self.convert(float(node.value.rstrip('fFlL')), 'double', node)
             self.fail(node, '字符串只能作为 printf 的格式文本')
@@ -533,6 +547,9 @@ class Runtime:
             self.contribute((ref[0], ref[2], ref[1].identity))
             return result
         if isinstance(node, ast.BinaryOp):
+            stream = stream_io.chain(node)
+            if stream:
+                return stream_io.execute(self, node, *stream)
             left = self.evaluate(node.left)
             if node.op == '&&':
                 result = int(self.truth(left, node.left) and self.truth(self.evaluate(node.right), node.right))
@@ -544,6 +561,17 @@ class Runtime:
                 return result
             return self.binary(node.op, left, self.evaluate(node.right), node)
         if isinstance(node, ast.UnaryOp):
+            if node.op == 'sizeof':
+                declaration = ast.Decl('__heap', [], None, [], [], node.expr.type, None, None, coord=node.coord)
+                loc = self.program.location(node)
+                initialized = self.program.allocations[(loc.line, loc.column)]
+                cell = struct_runtime.make_cell(self, declaration, initialized)
+                name = f'堆#{cell.identity}'
+                if len(self.heap) >= 512:
+                    self.fail(node, '同时存活堆对象超过 512 个')
+                self.heap[name] = cell
+                self.writes.append((name, None))
+                return Pointer(cell.identity, None, cell.type, name)
             if node.op == '&':
                 if isinstance(node.expr, ast.UnaryOp) and node.expr.op == '*':
                     value, _ = self.evaluate_sources(node.expr.expr)
@@ -583,6 +611,21 @@ class Runtime:
                 self.evaluate_sources(expr)
             return self.evaluate(node.exprs[-1]) if node.exprs else 0
         if isinstance(node, ast.FuncCall):
+            if node.name.name == '__cv_delete':
+                args = node.args.exprs if node.args else []
+                if len(args) != 1:
+                    self.fail(node, 'delete 需要单个指针')
+                pointer = self.evaluate(args[0])
+                if not isinstance(pointer, Pointer):
+                    self.fail(node, 'delete 需要指针')
+                if pointer.identity is None:
+                    return 0
+                target = next((name for name, cell in self.heap.items() if cell.identity == pointer.identity), None)
+                if target is None or pointer.index not in (None, 0) or pointer.row is not None:
+                    self.fail(node, 'delete 目标已释放或不是 new 创建的对象')
+                self.freed.update(cell.identity for _, cell in struct_runtime.cells(target, self.heap[target]))
+                del self.heap[target]
+                return 0
             if node.name.name in self.program.functions:
                 return self.call_function(node)
             if node.name.name in ('printf', 'scanf'):

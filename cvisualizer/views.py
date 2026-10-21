@@ -37,6 +37,7 @@ class MemoryView(QGraphicsView):
         self.array_anchors = {}
         self.function_boxes = {}
         self.structure_boxes = {}
+        self.linked_layer = None
         self._structure_names = ()
         self._context = ''
         self._view_offsets = {}
@@ -138,7 +139,7 @@ class MemoryView(QGraphicsView):
 
     def _visible_box(self, key):
         item = self.boxes[key]
-        name = 'scalar' if key[1] is None else 'array'
+        name = 'array' if getattr(item, '_linked', False) else ('scalar' if key[1] is None else 'array')
         clip, _ = self._sections[name]
         return clip.rect().contains(item.mapRectToScene(item.rect()))
 
@@ -182,7 +183,7 @@ class MemoryView(QGraphicsView):
         track_color(rect, "brush", fill)
         rect.setData(0, name)
         text = name if value is None else f'{name} = {display(value)}'
-        rect.setToolTip(text + ('（未初始化）' if value is None else ''))
+        rect.setToolTip(text + ('（未初始化）' if value is None else '') + ('\n'+str(value) if isinstance(value, Pointer) and str(value) != display(value) else ''))
         item = self.label(text, x+6, y+5 if compact else y+8, 9 if compact else 10, '#172b4d', True)
         cell_text_contrast(item, '#172b4d')
         item.setToolTip(rect.toolTip())
@@ -264,7 +265,7 @@ class MemoryView(QGraphicsView):
             self._view_offsets.clear()
             self._restoring_offsets = (0, 0)
         self._function_context = bool(context)
-        self._array_virtual = any(isinstance(c['value'], list) and not c.get('is_struct') and len(c['value']) > 64 for c in variables.values())
+        self._array_virtual = any(c.get('linked_node') for c in variables.values()) or any(isinstance(c['value'], list) and not c.get('is_struct') and len(c['value']) > 64 for c in variables.values())
         self._draw_offset = self._restoring_offsets[1] if self._restoring_offsets is not None else self._array_offset()
         previous = {key: QPointF(item.pos()) for key, item in self.motion.pointers.items()}
         was_busy = self.motion.busy
@@ -277,6 +278,7 @@ class MemoryView(QGraphicsView):
             self.boxes, self.array_anchors, self.function_boxes = {}, {}, {}
             self.structure_boxes = {}
             self.matrix_stacks, self.matrix_reveals = {}, []
+            self._linked_animate = animate and not same_event
             self._draw(variables, bindings, event)
             transfers = []
             if event and animate and not same_event and not event.calls:
@@ -285,7 +287,9 @@ class MemoryView(QGraphicsView):
                     if ((source in visible_before or source_front in visible_before) and source in self.boxes and target in self.boxes
                             and self._visible_box(source) and self._visible_box(target)):
                         color = RED if isinstance(variables.get(target[0], {}).get('value'), Pointer) else '#16a34a'
-                        transfers.append((exposed_rect(self.boxes[source]), exposed_rect(self.boxes[target]), color))
+                        source_box, target_box = self.boxes[source], self.boxes[target]
+                        anchors = ((source_box, target_box) if getattr(source_box, '_linked', False) or getattr(target_box, '_linked', False) else ())
+                        transfers.append((exposed_rect(source_box), exposed_rect(target_box), color, *anchors))
             destinations = {}
             matrix_targets = {}
             lanes = {}
@@ -345,7 +349,7 @@ class MemoryView(QGraphicsView):
                                    'rect': self._sections['array'][0].rect()}
             self.motion.start(transfers, destinations, previous, duration, animate and not same_event,
                               call_summary=summary, boolean_summary=boolean_summary,
-                              matrix_reveals=self.matrix_reveals, matrix_targets=matrix_targets)
+                              matrix_reveals=self.matrix_reveals, matrix_targets=matrix_targets, linked_layer=self.linked_layer)
             for key, item in self.motion.pointers.items():
                 if key in addresses:
                     item.setParentItem(self._address_clip)
@@ -408,7 +412,9 @@ class MemoryView(QGraphicsView):
         heading.setPlainText(QFontMetricsF(heading.font()).elidedText(heading.toPlainText(), Qt.TextElideMode.ElideRight, rail_width-12))
         self._begin_section('scalar', 88, height, rail_width, rail_left)
         y = 100
-        scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list) and not cell.get('is_struct')]
+        linked_members = {name+'.'+field for name, cell in variables.items()
+                          for field in cell.get('linked_node', {}).values()}
+        scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list) and not cell.get('is_struct') and name not in linked_members]
         functions = () if self._function_context else self._data[5]
         entries = ([('structure', name, None) for name in self._structure_names]
                    + [('function', name, None) for name in functions]
@@ -436,8 +442,14 @@ class MemoryView(QGraphicsView):
         self.scene().addLine(rail_left-7, 58, rail_left-7, height, QPen(QColor('#e2e8f0')))
         self._begin_section('array', 88, height, width)
         y = 100
+        from .linked_visuals import LinkedLayer
+        before = event.before if event and self._linked_animate else variables
+        self.linked_layer = LinkedLayer(self, variables, before, width, y+76, self._linked_animate)
+        if self.linked_layer.model or self.linked_layer.old_model:
+            self.label('单链表 · 节点与后继指针', 16, y-8, 10, '#dc2626', True)
+            y = self.linked_layer.bottom+12
         bound = {b.array: b for b in bindings}
-        if not any(isinstance(cell['value'], list) and not cell.get('is_struct') for cell in variables.values()):
+        if not self.linked_layer.model and not self.linked_layer.old_model and not any(isinstance(cell['value'], list) and not cell.get('is_struct') for cell in variables.values()):
             hint = self.label('声明数组后，在这里观察数组与数据结构。\n变量和函数显示在右侧。', 18, y, 10, '#64748b')
             hint.setTextWidth(max(80, width-36))
         for name, cell in variables.items():

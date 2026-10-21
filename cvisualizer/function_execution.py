@@ -47,7 +47,7 @@ class FunctionExecution:
                      and isinstance(cell['value'], Pointer)}
         target_names = {name for name, cell in visible.items() if cell['identity'] in addresses}
         return {name: cell for name, cell in visible.items()
-                if name in local or name in used or name.split('.',1)[0].split('[',1)[0] in local | used
+                if name.split('.',1)[0] in rt.heap or name in local or name in used or name.split('.',1)[0].split('[',1)[0] in local | used
                 or cell['identity'] in addresses or any(name.startswith(target+'.') or name.startswith(target+'[') for target in target_names)}
 
     def call(self, node):
@@ -61,6 +61,16 @@ class FunctionExecution:
             rt.fail(node, f'{spec.name} 参数数量不匹配')
         inputs, params = [], {}
         for param, arg in zip(spec.params, args):
+            if engine.program.is_reference(param):
+                ref = rt.reference(arg)
+                parameter_type = rt.program._scalar_type(param.type)
+                if ref[2] is not None or ref[1].type != parameter_type:
+                    rt.fail(arg, '引用参数需要同类型可寻址变量')
+                rt.check_writable(ref, arg)
+                params[param.name] = ref[1]
+                inputs.append({'name': param.name, 'expression': engine.program.location(arg).text,
+                               'value': deepcopy(ref[1].value), 'sources': []})
+                continue
             array = isinstance(param.type, ast.ArrayDecl)
             pointer = isinstance(param.type, ast.PtrDecl)
             base = param.type.type if array or pointer else param.type
@@ -100,6 +110,7 @@ class FunctionExecution:
         rt.callers.append(caller)
         rt.scopes = [caller[0], params]
         self.stack.append(spec)
+        engine._remember_linked_heads()
         record = {'name': spec.name, 'inputs': inputs, 'return': None}
         if len(self.stack) == 1:
             engine._calls.append(record)
@@ -115,8 +126,10 @@ class FunctionExecution:
                         rt.fail(param, '数组参数容量必须为正整数')
                     changed.update(rt.write_targets)
             loc = engine.program.location(spec.node.decl, 'function')
-            engine.capture_detail(Event(loc.line, loc.column, loc.text, loc.kind,
-                f'进入函数 {spec.name}', self.visible(), rt.output, function=spec.name))
+            entry_event = Event(loc.line, loc.column, loc.text, loc.kind,
+                f'进入函数 {spec.name}', self.visible(), rt.output, function=spec.name)
+            engine._linked_context(entry_event, engine.linked_liveness.entries[spec.name])
+            engine.capture_detail(entry_event)
             try:
                 # Parameters and outermost declarations share a scope in C.
                 for statement in spec.node.body.block_items or []:
@@ -127,18 +140,25 @@ class FunctionExecution:
                         rt.write_targets = []
                         rt.booleans = []
                         try:
-                            description = action.run()
+                            engine._live_stack.append(action.live)
+                            try:
+                                description = action.run()
+                            finally:
+                                engine._live_stack.pop()
                         finally:
                             changed.update(rt.write_targets)
                             visible_cells = rt.visible_cells()
                             read_targets.update(((visible_cells[name].identity, index), None)
                                                 for name, index in rt.reads if name in visible_cells)
                             transfers.extend(rt.transfers)
+                        engine._remember_linked_heads()
                         loc = action.location
                         if engine._record_detail:
-                            engine.capture_detail(Event(loc.line, loc.column, loc.text, loc.kind, str(description),
+                            detail_event = Event(loc.line, loc.column, loc.text, loc.kind, str(description),
                                 self.visible(), rt.output, list(rt.reads), list(rt.writes), before=before,
-                                transfers=list(rt.transfers), function=spec.name, booleans=deepcopy(rt.booleans)))
+                                transfers=list(rt.transfers), function=spec.name, booleans=deepcopy(rt.booleans))
+                            engine._linked_context(detail_event, action.live)
+                            engine.capture_detail(detail_event)
             except _Flow as flow:
                 if flow.kind != 'return':
                     raise

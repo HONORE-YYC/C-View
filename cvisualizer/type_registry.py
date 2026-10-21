@@ -1,6 +1,7 @@
 """Expand lexical aliases and give structure tags stable internal identities."""
 from copy import deepcopy
 from dataclasses import dataclass
+from .linked_language import SourceGenerator
 from pycparser import c_ast as ast, c_generator
 
 
@@ -19,7 +20,8 @@ class TypeRegistry:
         self.names = []
         self.counter = 0
         self.original = {}
-        self.generator = c_generator.CGenerator()
+        self.struct_nodes = {}
+        self.generator = SourceGenerator(program)
 
     def lookup(self, scopes, name):
         return next((scope[name] for scope in reversed(scopes) if name in scope), None)
@@ -54,6 +56,14 @@ class TypeRegistry:
     def walk(self, node):
         if node is None:
             return None
+        if isinstance(node, ast.UnaryOp) and node.op == 'sizeof' and isinstance(node.expr, ast.ID):
+            coord = node.coord
+            original = self.program.preprocessed.original(max(1, coord.line-self.program.offset), coord.column)
+            key = self.lookup(self.tags, node.expr.name)
+            if original in self.program.allocations and key is not None:
+                node.expr = ast.Typename(None, [], None, ast.TypeDecl(None, [], None, ast.Struct(key, None, coord), coord), coord)
+                # Already canonical: do not resolve this internal tag through lexical scope again.
+                return node
         if isinstance(node, ast.Typedef):
             if node.name in self.aliases[-1]:
                 self.program.fail(node, 'typedef 名称重复声明')
@@ -138,6 +148,8 @@ class TypeRegistry:
         if isinstance(node, ast.Union):
             self.program.fail(node, '暂不支持 union 联合体')
         if isinstance(node, ast.Struct):
+            if id(node) in self.struct_nodes:
+                return ast.Struct(self.struct_nodes[id(node)][1], None, node.coord)
             tag = node.name
             key = self.tags[-1].get(tag) if tag and (node.decls is not None or tag_only) else self.lookup(self.tags, tag)
             if key is None:
@@ -146,6 +158,7 @@ class TypeRegistry:
                 if tag:
                     self.tags[-1][tag] = key
                 self.structs['struct ' + key] = StructSpec(tag or display or 'anonymous', None)
+            self.struct_nodes[id(node)] = (node, key)
             spec = self.structs['struct ' + key]
             if node.decls is not None:
                 if spec.fields is not None:
