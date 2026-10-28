@@ -63,3 +63,17 @@ def test_template_import_cancel_preserves_unsaved_code(app, monkeypatch):
     assert window.editor.document().isModified()
     window.editor.document().setModified(False)
     window.close()
+
+
+def test_stack_template_is_available_from_menu_and_startup_notice(app):
+    window = MainWindow()
+    action = next((a for a in window.template_button.menu().actions() if '顺序栈' in a.text()), None)
+    assert action is not None
+    action.trigger()
+    assert 'SqStack' in window.editor.toPlainText()
+    assert 'new SElemType[MAXSIZE]' in window.editor.toPlainText()
+    assert not window.editor.isReadOnly() and window.path is None
+    window.show_linked_list_notice()
+    assert '顺序栈' in window.linked_list_notice.description.text()
+    window.linked_list_notice.accept()
+    window.close()

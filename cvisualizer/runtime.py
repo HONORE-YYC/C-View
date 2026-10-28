@@ -13,6 +13,8 @@ from .numeric import Long, LongLong, Char, type_name
 from .value_format import display
 from . import math_library
 from . import struct_runtime
+from . import stack_state
+from .errors import TeachingExit
 from .struct_runtime import StructValue
 from . import formatted_io
 from . import stream_io
@@ -65,6 +67,8 @@ class Runtime:
         self.callers = []
         self.heap = {}
         self.freed = set()
+        self.stack_popped = {}
+        self.exit_status = None
         self.write_targets = []
         self.output = ''
         self.reads, self.writes = [], []
@@ -93,15 +97,18 @@ class Runtime:
         visible = struct_runtime.flattened(visible)
         visible = {name: cell for name, cell in visible.items() if cell.identity not in self.freed}
         identities = {cell.identity for cell in visible.values()}
-        for value in list(visible.values()):
+        pending = list(visible.values())
+        for value in pending:
             pointer = value.value
             if isinstance(pointer, Pointer) and pointer.identity not in identities:
                 target = self.find_identity(pointer.identity)
                 if target:
                     name, cell = target
                     alias = name if name not in visible else f'{name}@{cell.identity}'
-                    visible.update(dict(struct_runtime.cells(alias, cell)))
-                    identities.add(cell.identity)
+                    members = dict(struct_runtime.cells(alias, cell))
+                    visible.update(members)
+                    pending.extend(member for member in members.values() if member.identity not in identities)
+                    identities.update(member.identity for member in members.values())
         return visible
 
     def snapshot(self):
@@ -396,10 +403,13 @@ class Runtime:
         if isinstance(cell.value, StructValue):
             return struct_runtime.copy_into(self, ref, value, node, sources)
         converted = self.convert(value, cell.type, node, cell.pointee_const)
+        old_value = cell.value if index is None else cell.value[index]
         if index is None:
             cell.value = converted
         else:
             cell.value[index] = converted
+        if isinstance(converted, Pointer):
+            stack_state.observe_write(self, ref, old_value, converted)
         self.writes.append((name, index))
         self.write_targets.append((cell.identity, index))
         target = name, index, cell.identity
@@ -571,7 +581,7 @@ class Runtime:
                     self.fail(node, '同时存活堆对象超过 512 个')
                 self.heap[name] = cell
                 self.writes.append((name, None))
-                return Pointer(cell.identity, None, cell.type, name)
+                return Pointer(cell.identity, 0 if isinstance(cell.value, list) else None, cell.type, name)
             if node.op == '&':
                 if isinstance(node.expr, ast.UnaryOp) and node.expr.op == '*':
                     value, _ = self.evaluate_sources(node.expr.expr)
@@ -611,7 +621,7 @@ class Runtime:
                 self.evaluate_sources(expr)
             return self.evaluate(node.exprs[-1]) if node.exprs else 0
         if isinstance(node, ast.FuncCall):
-            if node.name.name == '__cv_delete':
+            if node.name.name in ('__cv_delete', '__cv_delete_array'):
                 args = node.args.exprs if node.args else []
                 if len(args) != 1:
                     self.fail(node, 'delete 需要单个指针')
@@ -623,6 +633,8 @@ class Runtime:
                 target = next((name for name, cell in self.heap.items() if cell.identity == pointer.identity), None)
                 if target is None or pointer.index not in (None, 0) or pointer.row is not None:
                     self.fail(node, 'delete 目标已释放或不是 new 创建的对象')
+                if isinstance(self.heap[target].value, list) != (node.name.name == '__cv_delete_array'):
+                    self.fail(node, 'new[] 必须匹配 delete[]；结构体 new 必须匹配 delete')
                 self.freed.update(cell.identity for _, cell in struct_runtime.cells(target, self.heap[target]))
                 del self.heap[target]
                 return 0
@@ -651,6 +663,8 @@ class Runtime:
         if name == 'srand':
             self.random_state = value & 0xffffffff
             return None  # void: valid as a statement, invalid as a numeric operand.
+        if name == 'exit':
+            raise TeachingExit(self.convert(value, 'int', node))
         # A reproducible teaching LCG; RAND_MAX is 32767, not a platform ABI promise.
         self.random_state = (1103515245 * self.random_state + 12345) & 0x7fffffff
         return (self.random_state >> 16) & 32767

@@ -227,7 +227,7 @@ class MainWindow(QMainWindow):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         root.addWidget(self.status)
-        footer = QLabel('教学子集：变量、数组、typedef、结构体、单链表、单级指针、循环和非递归函数。支持结构体节点的 new/delete。')
+        footer = QLabel('教学子集：变量、数组、typedef、结构体、单链表、顺序栈、单级指针、循环和非递归函数。支持结构体和一维数值数组的动态分配。')
         footer.setObjectName('muted')
         footer.setWordWrap(True)
         root.addWidget(footer)

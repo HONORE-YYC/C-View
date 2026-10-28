@@ -112,6 +112,7 @@ class MotionLayer(QObject):
         self.summary = None
         self.boolean_summary = None
         self.linked_layer = None
+        self.stack_layer = None
         self.matrix_targets = {}
         self.matrix_reveals = []
         self._call_fraction = 1.
@@ -127,6 +128,9 @@ class MotionLayer(QObject):
 
     def clear(self):
         self.animation.stop()
+        if self.stack_layer is not None:
+            self.stack_layer.frame(1.)
+            self.stack_layer = None
         if self.linked_layer is not None:
             self.linked_layer.frame(1.)
             self.linked_layer = None
@@ -146,9 +150,10 @@ class MotionLayer(QObject):
                 self.scene.removeItem(item)
         self.arrows, self.pointers, self.destinations, self.origins = [], {}, {}, {}
 
-    def start(self, transfers, pointers, previous, duration, animate=True, call_summary=None, boolean_summary=None, matrix_reveals=(), matrix_targets=None, linked_layer=None):
+    def start(self, transfers, pointers, previous, duration, animate=True, call_summary=None, boolean_summary=None, matrix_reveals=(), matrix_targets=None, linked_layer=None, stack_layer=None):
         self.clear()
         self.linked_layer = linked_layer
+        self.stack_layer = stack_layer
         self.matrix_reveals = list(matrix_reveals) if animate else []
         self.matrix_targets = dict(matrix_targets or {})
         moving = False
@@ -181,11 +186,14 @@ class MotionLayer(QObject):
                     self.boolean_summary.root.setVisible(False)
                 else:
                     duration = boolean_duration
-        if self.arrows or moving or self.summary is not None or self.boolean_summary is not None or self.matrix_reveals or (linked_layer is not None and linked_layer.animate and (linked_layer.model or linked_layer.old_model)):
+        if self.arrows or moving or self.summary is not None or self.boolean_summary is not None or self.matrix_reveals or any(layer is not None and layer.animate and (layer.model or layer.old_model) for layer in (linked_layer, stack_layer)):
             self.animation.setDuration(max(1, int(duration)))
             self.animation.start()
 
     def frame(self, progress):
+        if self.stack_layer is not None:
+            stack_progress = max(0., (min(1., progress/self._call_fraction)-.68)/.32) if self.summary is not None else progress
+            self.stack_layer.frame(stack_progress)
         if self.linked_layer is not None:
             linked_progress = max(0., (min(1., progress/self._call_fraction)-.68)/.32) if self.summary is not None else progress
             self.linked_layer.frame(linked_progress)

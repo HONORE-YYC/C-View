@@ -46,9 +46,25 @@ class FunctionExecution:
                      if (name in local or name in used or name.split('.',1)[0].split('[',1)[0] in local | used)
                      and isinstance(cell['value'], Pointer)}
         target_names = {name for name, cell in visible.items() if cell['identity'] in addresses}
-        return {name: cell for name, cell in visible.items()
+        selected = {name: cell for name, cell in visible.items()
                 if name.split('.',1)[0] in rt.heap or name in local or name in used or name.split('.',1)[0].split('[',1)[0] in local | used
                 or cell['identity'] in addresses or any(name.startswith(target+'.') or name.startswith(target+'[') for target in target_names)}
+        # A pointer parameter may expose a struct whose members point to caller
+        # storage. Keep the entire reachable graph, including aliases and cycles.
+        by_identity = {cell['identity']: name for name, cell in visible.items()}
+        pending = list(selected.values())
+        for cell in pending:
+            pointer = cell['value']
+            if not isinstance(pointer, Pointer):
+                continue
+            target = by_identity.get(pointer.identity)
+            if target is None:
+                continue
+            for name, member in visible.items():
+                if name not in selected and (name == target or name.startswith(target+'.') or name.startswith(target+'[')):
+                    selected[name] = member
+                    pending.append(member)
+        return selected
 
     def call(self, node):
         from .engine import Event, _Flow

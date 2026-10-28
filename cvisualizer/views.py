@@ -38,6 +38,7 @@ class MemoryView(QGraphicsView):
         self.function_boxes = {}
         self.structure_boxes = {}
         self.linked_layer = None
+        self.stack_layer = None
         self._structure_names = ()
         self._context = ''
         self._view_offsets = {}
@@ -265,7 +266,7 @@ class MemoryView(QGraphicsView):
             self._view_offsets.clear()
             self._restoring_offsets = (0, 0)
         self._function_context = bool(context)
-        self._array_virtual = any(c.get('linked_node') for c in variables.values()) or any(isinstance(c['value'], list) and not c.get('is_struct') and len(c['value']) > 64 for c in variables.values())
+        self._array_virtual = any(c.get('linked_node') or c.get('stack_node') for c in variables.values()) or any(isinstance(c['value'], list) and not c.get('is_struct') and len(c['value']) > 64 for c in variables.values())
         self._draw_offset = self._restoring_offsets[1] if self._restoring_offsets is not None else self._array_offset()
         previous = {key: QPointF(item.pos()) for key, item in self.motion.pointers.items()}
         was_busy = self.motion.busy
@@ -288,7 +289,7 @@ class MemoryView(QGraphicsView):
                             and self._visible_box(source) and self._visible_box(target)):
                         color = RED if isinstance(variables.get(target[0], {}).get('value'), Pointer) else '#16a34a'
                         source_box, target_box = self.boxes[source], self.boxes[target]
-                        anchors = ((source_box, target_box) if getattr(source_box, '_linked', False) or getattr(target_box, '_linked', False) else ())
+                        anchors = ((source_box, target_box) if any(getattr(box, '_linked', False) or getattr(box, '_stack', False) for box in (source_box, target_box)) else ())
                         transfers.append((exposed_rect(source_box), exposed_rect(target_box), color, *anchors))
             destinations = {}
             matrix_targets = {}
@@ -340,6 +341,8 @@ class MemoryView(QGraphicsView):
                             old = indexed(old, target_index)
                         label = index_label(name, target_index)
                         old_text = label if old is None else f'{label} = {display(old)}'
+                        if getattr(item, '_stack', False):
+                            old_text = display(old)
                         old_text = QFontMetricsF(item.value_label.font()).elidedText(old_text, Qt.TextElideMode.ElideRight, item.rect().width()-14)
                         effects.append((item, item.value_label, old_text, item.value_label.toPlainText()))
                 summary = {'calls': event.calls, 'rect': self._sections['array'][0].rect(), 'effects': effects}
@@ -349,7 +352,8 @@ class MemoryView(QGraphicsView):
                                    'rect': self._sections['array'][0].rect()}
             self.motion.start(transfers, destinations, previous, duration, animate and not same_event,
                               call_summary=summary, boolean_summary=boolean_summary,
-                              matrix_reveals=self.matrix_reveals, matrix_targets=matrix_targets, linked_layer=self.linked_layer)
+                              matrix_reveals=self.matrix_reveals, matrix_targets=matrix_targets, linked_layer=self.linked_layer,
+                              stack_layer=self.stack_layer)
             for key, item in self.motion.pointers.items():
                 if key in addresses:
                     item.setParentItem(self._address_clip)
@@ -414,7 +418,11 @@ class MemoryView(QGraphicsView):
         y = 100
         linked_members = {name+'.'+field for name, cell in variables.items()
                           for field in cell.get('linked_node', {}).values()}
-        scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list) and not cell.get('is_struct') and name not in linked_members]
+        from .stack_state import models as stack_models
+        stacks = stack_models(variables)
+        self._stack_members = {model[field] for model in stacks.values() for field in ('base_name', 'top_name')}
+        claimed_storage = {model['storage_identity'] for model in stacks.values() if model['storage_identity'] is not None}
+        scalars = [(name, cell) for name, cell in variables.items() if not isinstance(cell['value'], list) and not cell.get('is_struct') and name not in linked_members | self._stack_members]
         functions = () if self._function_context else self._data[5]
         entries = ([('structure', name, None) for name in self._structure_names]
                    + [('function', name, None) for name in functions]
@@ -448,12 +456,15 @@ class MemoryView(QGraphicsView):
         if self.linked_layer.model or self.linked_layer.old_model:
             self.label('单链表 · 节点与后继指针', 16, y-8, 10, '#dc2626', True)
             y = self.linked_layer.bottom+12
+        from .stack_visuals import StackLayer
+        self.stack_layer = StackLayer(self, variables, before, width, y, self._linked_animate)
+        y = self.stack_layer.bottom
         bound = {b.array: b for b in bindings}
-        if not self.linked_layer.model and not self.linked_layer.old_model and not any(isinstance(cell['value'], list) and not cell.get('is_struct') for cell in variables.values()):
+        if not stacks and not self.linked_layer.model and not self.linked_layer.old_model and not any(isinstance(cell['value'], list) and not cell.get('is_struct') for cell in variables.values()):
             hint = self.label('声明数组后，在这里观察数组与数据结构。\n变量和函数显示在右侧。', 18, y, 10, '#64748b')
             hint.setTextWidth(max(80, width-36))
         for name, cell in variables.items():
-            if not isinstance(cell['value'], list) or cell.get('is_struct'):
+            if not isinstance(cell['value'], list) or cell.get('is_struct') or cell['identity'] in claimed_storage:
                 continue
             model = describe(bound.get(name, Binding(name)), variables)
             self.label(f'{name}  /  {KINDS[model.kind]}', 16, y, 13, '#0f172a', True)

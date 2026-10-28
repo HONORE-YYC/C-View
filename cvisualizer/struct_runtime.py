@@ -65,6 +65,9 @@ def snapshot(rt, visible):
         if isinstance(cell.value,(StructValue,StructArray)): item['is_struct']=True
         if isinstance(cell.value,StructValue) and cell.type in rt.program.linked_types:
             item['linked_node']=dict(rt.program.linked_types[cell.type])
+        if isinstance(cell.value,StructValue) and cell.type in rt.program.stack_types:
+            item['stack_node']=dict(rt.program.stack_types[cell.type])
+            item['stack_popped']=deepcopy(rt.stack_popped.get(cell.identity))
         if '.' in name:
             owner=name.rsplit('.',1)[0]
             parent=visible.get(owner)

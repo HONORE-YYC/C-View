@@ -7,6 +7,7 @@ from collections import deque
 from pycparser import c_ast as ast
 
 from .language import CError, Location, Program
+from .errors import TeachingExit
 from .runtime import Runtime
 from .motion import index_bindings, index_markers, pointer_slots, indirect_index_slots
 from .member_motion import member_index_bindings, member_index_markers
@@ -124,11 +125,11 @@ class Engine:
 
     def _state(self):
         rt = self.runtime
-        return deepcopy((rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool, rt.heap, rt.freed))
+        return deepcopy((rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool, rt.heap, rt.freed, rt.stack_popped, rt.exit_status))
 
     def _restore(self, state):
         rt = self.runtime
-        rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool, rt.heap, rt.freed = deepcopy(state)
+        rt.scopes, rt.callers, rt.output, rt.random_state, rt.next_identity, rt.input_position, rt.literals, rt.literal_pool, rt.heap, rt.freed, rt.stack_popped, rt.exit_status = deepcopy(state)
 
     def _consume(self, location):
         if self._operations >= self.max_steps:
@@ -217,6 +218,10 @@ class Engine:
                 description = action.run()
             finally:
                 self._live_stack.pop()
+        except TeachingExit as stop:
+            rt.exit_status = stop.status
+            self.finished = True
+            description = f'exit({stop.status})：结束程序'
         except CError:
             self._restore(backup)
             self._operations = operations_before

@@ -30,17 +30,29 @@ def lower(preprocessed):
             amp=mask.index('&',start,header.start(1)+ref.end())
             references.update((*offsets[index],ref[1]) for index in range(start,header.start(1)+ref.end()))
             edits.append((amp,amp+1,' '))
-    for match in re.finditer(r'\bnew\s+((?:struct\s+)?[A-Za-z_]\w*)\s*(\(\s*\))?',mask):
+    for match in re.finditer(r'\bnew\s+((?:struct\s+)?[A-Za-z_]\w*(?:\s+long|\s+int)*)\s*',mask):
         end=match.end()
-        # Do not silently accept arrays or argument constructors.
-        replacement='sizeof('+match[1]+')'
-        allocations[offsets[match.start()]]=bool(match[2])
+        typename=match[1]
+        if end<len(mask) and mask[end]=='[':
+            start=end
+            depth=1
+            end+=1
+            while end<len(mask) and depth:
+                depth+=(mask[end]=='[')-(mask[end]==']')
+                end+=1
+            if depth:
+                continue  # Let the parser report the unmatched bracket.
+            typename+=text[start:end]
+        initialized=re.match(r'\s*\(\s*\)',mask[end:])
+        if initialized:
+            end+=initialized.end()
+        replacement='sizeof('+typename+')'
+        allocations[offsets[match.start()]]=bool(initialized)
         edits.append((match.start(),end,replacement))
-    for match in re.finditer(r'\bdelete\s+([^;]+)',mask):
-        if match[1].lstrip().startswith('['):
-            continue
+    for match in re.finditer(r'\bdelete\b\s*(\[\s*\])?\s*([^;]+)',mask):
         deletions.add(offsets[match.start()])
-        edits.append((match.start(),match.end(),'__cv_delete('+text[match.start(1):match.end(1)]+')'))
+        function='__cv_delete_array' if match[1] else '__cv_delete'
+        edits.append((match.start(),match.end(),function+'('+text[match.start(2):match.end(2)]+')'))
     for start,end,replacement in sorted(edits,reverse=True):
         origin=offsets[start]
         text=text[:start]+replacement+text[end:]
@@ -102,8 +114,8 @@ class SourceGenerator(c_generator.CGenerator):
         return super().visit_BinaryOp(node)
 
     def visit_FuncCall(self, node):
-        if getattr(node.name,'name',None)=='__cv_delete' and self.origin(node) in self.program.deletions:
-            return 'delete '+self.visit(node.args)
+        if getattr(node.name,'name',None) in ('__cv_delete','__cv_delete_array') and self.origin(node) in self.program.deletions:
+            return ('delete[] ' if node.name.name=='__cv_delete_array' else 'delete ')+self.visit(node.args)
         return super().visit_FuncCall(node)
 
     def visit_Decl(self, node, no_type=False):

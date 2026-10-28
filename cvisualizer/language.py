@@ -10,6 +10,7 @@ from .type_registry import TypeRegistry
 from .math_library import FUNCTIONS as MATH_FUNCTIONS
 from .qualifiers import qualifiers
 from .linked_language import lower, linked_types, SourceGenerator
+from .stack_state import stack_types
 from .stream_io import chain as stream_chain, NAMES as STREAM_NAMES
 
 
@@ -31,7 +32,7 @@ class Function:
 
 _BUILTINS = {'printf', 'scanf', 'abs', 'labs', 'rand', 'srand', 'atoi', 'atol', 'atof',
              'strlen', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strcmp', 'strncmp',
-             'strchr', 'strrchr', 'strstr', '__cv_delete'}
+             'strchr', 'strrchr', 'strstr', '__cv_delete', '__cv_delete_array', 'exit'}
 _BUILTINS |= set(MATH_FUNCTIONS)
 _TOKENS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
 _GENERATOR = c_generator.CGenerator()
@@ -62,6 +63,7 @@ class Program:
         self.structs = self.type_registry.structs
         self.structure_names = self.type_registry.names
         self.linked_types = linked_types(self)
+        self.stack_types = stack_types(self)
         self.globals = []
         self.main = None
         self.functions = {}
@@ -310,8 +312,17 @@ class Program:
             loc = self.location(node)
             if (loc.line, loc.column) not in self.allocations:
                 self.fail(node, '暂不支持 sizeof')
+            if isinstance(node.expr, ast.Typename) and isinstance(node.expr.type, ast.ArrayDecl):
+                array = node.expr.type
+                if not isinstance(array.type, ast.TypeDecl) or not isinstance(array.type.type, ast.IdentifierType):
+                    self.fail(node, 'new[] 仅支持一维数值数组')
+                self._scalar_type(array.type)
+                if array.dim is None:
+                    self.fail(node, 'new[] 需要数组容量')
+                self._check(array.dim, loops, depth + 1, function, global_scope)
+                return
             if not isinstance(node.expr, ast.Typename) or not isinstance(node.expr.type, ast.TypeDecl) or not isinstance(node.expr.type.type, ast.Struct):
-                self.fail(node, 'new 仅支持完整结构体')
+                self.fail(node, 'new 仅支持完整结构体或一维数值数组')
             self.type_registry.complete_object(node.expr.type, node)
             return
         if isinstance(node, ast.FuncCall):
@@ -320,7 +331,7 @@ class Program:
             if not isinstance(node.name, ast.ID):
                 self.fail(node, '仅支持通过函数名称直接调用')
             name = node.name.name
-            if name == '__cv_delete':
+            if name in ('__cv_delete', '__cv_delete_array'):
                 loc = self.location(node)
                 if (loc.line, loc.column) not in self.deletions:
                     self.fail(node, '内部 delete 名称不能直接调用')

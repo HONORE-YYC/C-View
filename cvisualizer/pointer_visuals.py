@@ -12,6 +12,8 @@ def address_markers(view, variables, blue_lanes):
     by_identity = {cell['identity']: (name, cell) for name, cell in variables.items()}
     array_lanes, scalar_lanes = {}, {}
     for name, cell in variables.items():
+        if name in getattr(view, '_stack_members', ()):
+            continue
         address = cell['value']
         if not isinstance(address, Pointer) or address.identity is None:
             continue
